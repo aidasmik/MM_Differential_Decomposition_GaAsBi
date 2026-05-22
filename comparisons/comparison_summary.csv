@@ -1,10 +1,10 @@
 metric,value,unit,note
-records,5,,
-Eg_mean,1.1398940000000002,eV,
-Eg_std,0.07710164449608062,eV,
-splitting_mean,54.626,meV,
-splitting_std,17.740033370881804,meV,
-Eg_vs_Bi_slope,-65.76405891127784,meV/%Bi,linear fit
-Eg_vs_Bi_intercept,1.3732248810172138,eV,linear fit
-splitting_vs_Bi_slope,11.400676011649661,meV/%Bi,linear fit
-splitting_vs_Bi_intercept,14.176401510666988,meV,linear fit
+records,4,,
+Eg_mean,1.1439025,eV,
+Eg_std,0.08573499354843386,eV,
+splitting_mean,51.9025,meV,
+splitting_std,18.875876635271805,meV,
+Eg_vs_Bi_slope,-65.61342359424057,meV/%Bi,linear fit
+Eg_vs_Bi_intercept,1.3755178852876688,eV,linear fit
+splitting_vs_Bi_slope,11.26638324346744,meV/%Bi,linear fit
+splitting_vs_Bi_intercept,12.132167150559912,meV,linear fit
