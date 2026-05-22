@@ -2023,6 +2023,203 @@ def _best_local_split_fit(
     return best
 
 
+def kk_split_model(
+    energy_eV: np.ndarray,
+    center_eV: float,
+    delta_eV: float,
+    broadening_eV: float,
+    amplitude_low: float,
+    amplitude_high: float,
+    phase_rad: float = 0.0,
+    exponent: float = -0.5,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (linear_dichroism, linear_birefringence) from one shared model.
+
+    A single complex anisotropic susceptibility is built from two critical
+    points at ``center_eV -/+ delta_eV / 2``. Linear dichroism is its
+    absorptive (imaginary) part and linear birefringence its dispersive (real)
+    part. Because both channels are generated from the *same* transition
+    energies, broadening, and amplitudes, the model is Kramers-Kronig
+    consistent by construction: LD and LB cannot prefer different transition
+    energies. ``phase_rad`` is a single shared phase that fixes which quadrature
+    is absorptive without breaking the 90-degree LD/LB relationship.
+    """
+    energy = np.asarray(energy_eV, dtype=np.float64)
+    center = float(center_eV)
+    delta = abs(float(delta_eV))
+    low_profile = _critical_point_complex_profile(
+        energy, center - 0.5 * delta, broadening_eV, exponent
+    )
+    high_profile = _critical_point_complex_profile(
+        energy, center + 0.5 * delta, broadening_eV, exponent
+    )
+    susceptibility = np.exp(1j * float(phase_rad)) * (
+        float(amplitude_low) * low_profile + float(amplitude_high) * high_profile
+    )
+    return np.imag(susceptibility), np.real(susceptibility)
+
+
+def fit_kk_consistent_split_to_decomposition(
+    result: dict[str, Any],
+    *,
+    energy_min: float,
+    energy_max: float,
+    vector_part: str = "real",
+    axis_offset_deg: float = 0.0,
+    exponent: float = -0.5,
+    max_delta_eV: float | None = 0.20,
+    initial: dict[str, float] | None = None,
+    loss: str = "soft_l1",
+) -> dict[str, Any]:
+    """Jointly fit the LD and LB on-axis spectra with one KK-consistent model.
+
+    Unlike fitting LD and LB independently and then averaging their separate
+    transition energies, this shares ``center_eV``, ``delta_eV``, and
+    ``broadening_eV`` across both channels, so the returned ``delta_eV`` is the
+    splitting that simultaneously explains dichroism and birefringence. Each
+    channel keeps its own amplitude, linear baseline, and robust scale.
+    """
+    terms = result["terms"]
+    rotations = result["rotations_deg"]
+    energy = np.asarray(result["energy_eV"], dtype=np.float64)
+
+    ld = collapse_twofold_anisotropy_spectrum(
+        terms["linear_dichroism_x"],
+        terms["linear_dichroism_y"],
+        rotations,
+        value_part=vector_part,
+        axis_offset_deg=axis_offset_deg,
+    )
+    lb = collapse_twofold_anisotropy_spectrum(
+        terms["linear_birefringence_x"],
+        terms["linear_birefringence_y"],
+        rotations,
+        value_part=vector_part,
+        axis_offset_deg=axis_offset_deg,
+    )
+    ld_values = np.real(ld["spectrum"])
+    lb_values = np.real(lb["spectrum"])
+
+    finite = (
+        np.isfinite(energy)
+        & np.isfinite(ld_values)
+        & np.isfinite(lb_values)
+        & (energy >= float(energy_min))
+        & (energy <= float(energy_max))
+    )
+    fit_energy = energy[finite]
+    ld_target = ld_values[finite]
+    lb_target = lb_values[finite]
+    if fit_energy.size < 10:
+        raise ValueError("Not enough finite points for a joint KK split fit.")
+
+    order = np.argsort(fit_energy)
+    fit_energy = fit_energy[order]
+    ld_target = ld_target[order]
+    lb_target = lb_target[order]
+
+    ld_scale = max(_mad_scale(ld_target - np.nanmedian(ld_target)), 1.0e-12)
+    lb_scale = max(_mad_scale(lb_target - np.nanmedian(lb_target)), 1.0e-12)
+    energy_ref = float(np.nanmean(fit_energy))
+
+    e_min = float(np.nanmin(fit_energy))
+    e_max = float(np.nanmax(fit_energy))
+    span = max(e_max - e_min, 1.0e-6)
+    step = float(np.nanmedian(np.diff(fit_energy)))
+    delta_upper = 0.25 * span if max_delta_eV is None else float(max_delta_eV)
+    delta_upper = max(delta_upper, max(0.010, 2.0 * abs(step)))
+    broadening_lower = max(1.0e-5, 0.25 * abs(step))
+    broadening_upper = max(0.5 * span, 10.0 * broadening_lower)
+    amplitude_bound = 20.0 * max(ld_scale, lb_scale)
+
+    # parameter order: center, delta, broadening, amp_low, amp_high, phase,
+    #                   off_ld, slope_ld, off_lb, slope_lb
+    lower = np.array(
+        [e_min, 0.0, broadening_lower, -amplitude_bound, -amplitude_bound, -np.pi,
+         -20.0 * ld_scale, -20.0 * ld_scale / span,
+         -20.0 * lb_scale, -20.0 * lb_scale / span],
+        dtype=np.float64,
+    )
+    upper = np.array(
+        [e_max, delta_upper, broadening_upper, amplitude_bound, amplitude_bound, np.pi,
+         20.0 * ld_scale, 20.0 * ld_scale / span,
+         20.0 * lb_scale, 20.0 * lb_scale / span],
+        dtype=np.float64,
+    )
+
+    peak_index = int(np.nanargmax(np.abs(ld_target - np.nanmedian(ld_target))))
+    guess = {
+        "center_eV": float(fit_energy[peak_index]),
+        "delta_eV": min(0.040, 0.5 * delta_upper),
+        "broadening_eV": max(0.010, 3.0 * abs(step)),
+        "amplitude_low": ld_scale,
+        "amplitude_high": -ld_scale,
+        "phase_rad": 0.0,
+        "offset_ld": float(np.nanmedian(ld_target)),
+        "slope_ld": 0.0,
+        "offset_lb": float(np.nanmedian(lb_target)),
+        "slope_lb": 0.0,
+    }
+    if initial:
+        guess.update({k: float(v) for k, v in initial.items() if k in guess})
+    p0 = np.clip(
+        np.array(list(guess.values()), dtype=np.float64),
+        lower + 1.0e-12,
+        upper - 1.0e-12,
+    )
+
+    def residuals(params: np.ndarray) -> np.ndarray:
+        (center, delta, broadening, amp_low, amp_high, phase,
+         off_ld, slope_ld, off_lb, slope_lb) = params
+        ld_model, lb_model = kk_split_model(
+            fit_energy, center, delta, broadening, amp_low, amp_high, phase,
+            exponent=exponent,
+        )
+        ld_model = ld_model + off_ld + slope_ld * (fit_energy - energy_ref)
+        lb_model = lb_model + off_lb + slope_lb * (fit_energy - energy_ref)
+        return np.concatenate(
+            [(ld_model - ld_target) / ld_scale, (lb_model - lb_target) / lb_scale]
+        )
+
+    opt = least_squares(
+        residuals, p0, bounds=(lower, upper), loss=loss, f_scale=1.0, max_nfev=5000
+    )
+    names = (
+        "center_eV", "delta_eV", "broadening_eV", "amplitude_low", "amplitude_high",
+        "phase_rad", "offset_ld", "slope_ld", "offset_lb", "slope_lb",
+    )
+    parameters = {name: float(value) for name, value in zip(names, opt.x)}
+    parameters["delta_eV"] = abs(parameters["delta_eV"])
+    parameters["delta_meV"] = 1000.0 * parameters["delta_eV"]
+    parameters["lower_transition_eV"] = parameters["center_eV"] - 0.5 * parameters["delta_eV"]
+    parameters["upper_transition_eV"] = parameters["center_eV"] + 0.5 * parameters["delta_eV"]
+
+    final = residuals(opt.x)
+    n_per_channel = fit_energy.size
+    ld_residual = final[:n_per_channel]
+    lb_residual = final[n_per_channel:]
+    rmse = float(np.sqrt(np.mean(final**2)))
+    ld_rmse = float(np.sqrt(np.mean(ld_residual**2)))
+    lb_rmse = float(np.sqrt(np.mean(lb_residual**2)))
+
+    return {
+        "success": bool(opt.success),
+        "message": opt.message,
+        "parameters": parameters,
+        "energy_eV": fit_energy,
+        "ld_values": ld_target,
+        "lb_values": lb_target,
+        "energy_window_eV": (float(energy_min), float(energy_max)),
+        "rmse": rmse,
+        "ld_rmse": ld_rmse,
+        "lb_rmse": lb_rmse,
+        "n_points": int(fit_energy.size),
+        "exponent": float(exponent),
+        "vector_part": vector_part,
+        "axis_offset_deg": float(axis_offset_deg),
+    }
+
+
 def _estimate_energy_windows_overlap(
     first: dict[str, Any],
     second: dict[str, Any],
@@ -2191,13 +2388,14 @@ def summarize_splitting_consensus(
         key=lambda item: (
             not bool(item["energy_windows_overlap"]),
             not bool(item["within_agreement_tolerance"]),
-            float(item["spread_meV"]),
             confidence_order.get(str(item["confidence"]), 9),
+            float(item["spread_meV"]),
             min(item["component_estimate_ranks"]),
         )
     )
     for rank, item in enumerate(pair_candidates, start=1):
         item["rank"] = rank
+        _add_delta_vb_recommendation(item)
 
     matched_ranks = {
         rank
@@ -2237,6 +2435,81 @@ def summarize_splitting_consensus(
     }
 
 
+def _finite_or_nan(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return np.nan
+    return number if np.isfinite(number) else np.nan
+
+
+def _add_delta_vb_recommendation(primary: dict[str, Any]) -> None:
+    """Add conservative Delta Vb recommendation fields to a consensus match."""
+    warnings_out: list[str] = []
+    tolerance = float(primary.get("agreement_tolerance_meV", 7.5))
+    spread = _finite_or_nan(primary.get("spread_meV"))
+    spread_text = f"{spread:.2f}" if np.isfinite(spread) else "unknown"
+    tolerance_text = f"{tolerance:.2f}" if np.isfinite(tolerance) else "unknown"
+
+    if not bool(primary.get("energy_windows_overlap")):
+        warnings_out.append("LD/LB energy windows do not overlap.")
+    if not bool(primary.get("within_agreement_tolerance")):
+        warnings_out.append(
+            f"LD/LB independent split spread is {spread_text} meV, above "
+            f"the {tolerance_text} meV tolerance."
+        )
+
+    qualities = [str(value) for value in primary.get("component_assignment_quality", [])]
+    stabilities = [str(value) for value in primary.get("component_fit_stability", [])]
+    component_values = [
+        value
+        for value in (
+            _finite_or_nan(item)
+            for item in primary.get("component_splittings_meV", [])
+        )
+        if np.isfinite(value)
+    ]
+    if len(component_values) < 2:
+        warnings_out.append("Fewer than two finite LD/LB component splits were available.")
+    if any(value != "paired_features" for value in qualities):
+        warnings_out.append(
+            "At least one component split came from a single feature; a "
+            "two-transition split is underdetermined there."
+        )
+    if any(value != "stable" for value in stabilities):
+        warnings_out.append(
+            "At least one component fit has multiple local minima."
+        )
+
+    kk_value = _finite_or_nan(primary.get("kk_splitting_meV"))
+    if primary.get("kk_fit_success") is False:
+        message = str(primary.get("kk_fit_message", "")).strip()
+        if message:
+            warnings_out.append(f"Joint KK LD/LB validation failed: {message}")
+        else:
+            warnings_out.append("Joint KK LD/LB validation failed.")
+    if np.isfinite(kk_value) and component_values:
+        kk_distance = max(abs(kk_value - value) for value in component_values)
+        primary["kk_component_max_difference_meV"] = float(kk_distance)
+        if kk_distance > max(tolerance, spread if np.isfinite(spread) else 0.0):
+            warnings_out.append(
+                "Joint KK split disagrees with one or more independent "
+                "LD/LB component splits."
+            )
+
+    if warnings_out:
+        primary["recommended_delta_vb_meV"] = np.nan
+        primary["recommended_delta_source"] = "manual_review_required"
+    else:
+        primary["recommended_delta_vb_meV"] = float(primary["splitting_meV"])
+        if np.isfinite(kk_value):
+            primary["recommended_delta_source"] = "stable_ld_lb_mean_kk_validated"
+        else:
+            primary["recommended_delta_source"] = "stable_ld_lb_independent_mean"
+    primary["math_warnings"] = warnings_out
+    primary["requires_manual_delta_vb"] = bool(warnings_out)
+
+
 def estimate_valence_band_splittings(
     result: dict[str, Any],
     feature_scan: dict[str, Any] | None = None,
@@ -2258,6 +2531,10 @@ def estimate_valence_band_splittings(
     The returned ``splitting_meV`` is the fitted transition separation. It is a
     valence-band splitting only under the physical assignment that the two
     fitted optical transitions share the same conduction-band final state.
+
+    A Kramers-Kronig-consistent joint LD/LB fit
+    (:func:`fit_kk_consistent_split_to_decomposition`) is run on the primary
+    energy window and reported under ``kk_consistent_split``.
     """
     energy = np.asarray(result["energy_eV"], dtype=np.float64)
     if energy.size == 0:
@@ -2432,6 +2709,45 @@ def estimate_valence_band_splittings(
         agreement_tolerance_meV=consensus_tolerance_meV,
     )
 
+    kk_split: dict[str, Any] | None = None
+    primary = consensus.get("primary")
+    if primary is not None:
+        windows = [
+            tuple(window)
+            for window in primary.get("component_energy_windows_eV", [])
+            if len(tuple(window)) == 2
+            and all(np.isfinite(float(value)) for value in window)
+        ]
+        if windows:
+            kk_lower = min(float(window[0]) for window in windows)
+            kk_upper = max(float(window[1]) for window in windows)
+            try:
+                kk_split = fit_kk_consistent_split_to_decomposition(
+                    result,
+                    energy_min=kk_lower,
+                    energy_max=kk_upper,
+                    vector_part=vector_part,
+                    axis_offset_deg=axis_offset_deg,
+                    exponent=exponent,
+                    max_delta_eV=max_delta_eV,
+                )
+            except Exception as exc:
+                kk_split = {"success": False, "message": str(exc)}
+        if kk_split is not None and kk_split.get("success"):
+            kk_params = kk_split["parameters"]
+            primary["kk_fit_success"] = True
+            primary["kk_splitting_meV"] = kk_params["delta_meV"]
+            primary["kk_center_eV"] = kk_params["center_eV"]
+            primary["kk_lower_transition_eV"] = kk_params["lower_transition_eV"]
+            primary["kk_upper_transition_eV"] = kk_params["upper_transition_eV"]
+            primary["kk_ld_rmse"] = kk_split["ld_rmse"]
+            primary["kk_lb_rmse"] = kk_split["lb_rmse"]
+        elif kk_split is not None:
+            primary["kk_fit_success"] = False
+            primary["kk_fit_message"] = str(kk_split.get("message", ""))
+        _add_delta_vb_recommendation(primary)
+    consensus["kk_consistent_split"] = kk_split
+
     return {
         "settings": {
             "term_prefixes": tuple(term_prefixes),
@@ -2452,7 +2768,10 @@ def estimate_valence_band_splittings(
         "message": "ok",
         "note": (
             "splitting_meV is a valence-band splitting only if the two "
-            "transitions share the same conduction-band final state."
+            "transitions share the same conduction-band final state. "
+            "recommended_delta_vb_meV is filled only when the LD/LB pair passes "
+            "the stability, assignment, agreement, and joint KK consistency checks. "
+            "kk_consistent_split is the joint Kramers-Kronig LD/LB fit splitting."
         ),
     }
 
@@ -2520,6 +2839,32 @@ def build_short_report_rows(
         add("main_result", "splitting", primary.get("splitting_meV"), "meV")
         add(
             "main_result",
+            "recommended_delta_vb",
+            primary.get("recommended_delta_vb_meV"),
+            "meV",
+            primary.get("recommended_delta_source", ""),
+        )
+        add(
+            "main_result",
+            "kk_splitting",
+            primary.get("kk_splitting_meV"),
+            "meV",
+            "joint Kramers-Kronig LD/LB fit",
+        )
+        add(
+            "main_result",
+            "kk_component_max_difference",
+            primary.get("kk_component_max_difference_meV"),
+            "meV",
+            "largest difference between joint KK and independent LD/LB splits",
+        )
+        add(
+            "main_result",
+            "requires_manual_delta_vb",
+            primary.get("requires_manual_delta_vb", ""),
+        )
+        add(
+            "main_result",
             "splitting_spread",
             primary.get("spread_meV"),
             "meV",
@@ -2540,6 +2885,7 @@ def build_short_report_rows(
             primary.get("agreement_tolerance_meV", ""),
             "meV",
         )
+        add("main_result", "math_warnings", primary.get("math_warnings", []))
         add(
             "main_result",
             "component_splittings",

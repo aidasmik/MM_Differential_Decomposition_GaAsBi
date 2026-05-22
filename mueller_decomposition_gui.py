@@ -222,6 +222,12 @@ def write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
     fields = [
         "rank",
         "bandgap_eV",
+        "recommended_delta_vb_meV",
+        "recommended_delta_source",
+        "kk_splitting_meV",
+        "kk_component_max_difference_meV",
+        "kk_fit_success",
+        "kk_fit_message",
         "bandgap_spread_eV",
         "upper_transition_eV",
         "upper_transition_spread_eV",
@@ -234,6 +240,8 @@ def write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
         "confidence",
         "basis",
         "energy_windows_overlap",
+        "requires_manual_delta_vb",
+        "math_warnings",
         "component_estimate_ranks",
         "component_terms",
         "component_splittings_meV",
@@ -280,6 +288,9 @@ def write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
             )
             row["component_fit_stability"] = ";".join(
                 match.get("component_fit_stability", [])
+            )
+            row["math_warnings"] = ";".join(
+                str(warning) for warning in match.get("math_warnings", [])
             )
             row["component_energy_windows_eV"] = ";".join(
                 f"{float(window[0]):.10g}-{float(window[1]):.10g}"
@@ -888,13 +899,33 @@ class MuellerDecompositionApp(tk.Tk):
                         "Eg: not assigned; selected LD/LB result does not use "
                         "overlapping energy windows\n"
                     )
+                recommended = self._format_result_value(
+                    primary.get("recommended_delta_vb_meV"),
+                    2,
+                )
+                kk_split = self._format_result_value(primary.get("kk_splitting_meV"), 2)
+                if recommended:
+                    self._append_results(
+                        f"Recommended Delta Vb: {recommended} meV "
+                        f"({primary.get('recommended_delta_source', '')})\n"
+                    )
+                else:
+                    self._append_results(
+                        "Recommended Delta Vb: manual review required; the "
+                        "automatic LD/LB split failed one or more math checks.\n"
+                    )
                 self._append_results(
-                    f"Valence-band splitting: {float(primary['splitting_meV']):.2f} meV "
+                    f"Raw LD/LB split mean: {float(primary['splitting_meV']):.2f} meV "
                     f"(components: {values_text} meV; "
                     f"spread {float(primary['spread_meV']):.2f} meV; "
                     f"{primary['confidence']}; {primary['basis']})\n"
                 )
-                if within_tolerance is False:
+                if kk_split:
+                    self._append_results(f"Joint KK split: {kk_split} meV\n")
+                warnings_text = "; ".join(primary.get("math_warnings", []))
+                if warnings_text:
+                    self._append_results(f"Math warning: {warnings_text}\n")
+                elif within_tolerance is False:
                     self._append_results(
                         "Note: the selected LD/LB energy windows overlap, but "
                         "the splitting spread is above the agreement tolerance.\n"
@@ -1052,13 +1083,19 @@ class MuellerDecompositionApp(tk.Tk):
             return None
 
         frame = ttk.Frame(self.output_notebook, padding=14)
-        for column in range(2):
+        for column in range(3):
             frame.columnconfigure(column, weight=1)
 
         bandgap_text = self._format_result_value(primary.get("bandgap_eV"), 5)
         bandgap_spread = self._format_result_value(primary.get("bandgap_spread_eV"), 5)
+        recommended_delta = self._format_result_value(
+            primary.get("recommended_delta_vb_meV"),
+            2,
+        )
+        recommended_source = str(primary.get("recommended_delta_source", ""))
         splitting_text = self._format_result_value(primary.get("splitting_meV"), 2)
         splitting_spread = self._format_result_value(primary.get("spread_meV"), 2)
+        kk_split = self._format_result_value(primary.get("kk_splitting_meV"), 2)
         agreement_tolerance = self._format_result_value(
             primary.get("agreement_tolerance_meV"),
             2,
@@ -1101,9 +1138,19 @@ class MuellerDecompositionApp(tk.Tk):
                 "Difference between component lower-transition energies.",
             ),
             (
-                "Valence-band splitting",
+                "Recommended Delta Vb",
+                f"{recommended_delta} meV" if recommended_delta else "manual review",
+                recommended_source,
+            ),
+            (
+                "Raw LD/LB split mean",
                 f"{splitting_text} meV" if splitting_text else "",
                 "Average of the selected LD and LB splitting estimates.",
+            ),
+            (
+                "Joint KK split",
+                f"{kk_split} meV" if kk_split else "",
+                "One shared LD/LB critical-point model.",
             ),
             (
                 "Splitting spread",
@@ -1144,6 +1191,7 @@ class MuellerDecompositionApp(tk.Tk):
                     pady=4,
                 )
 
+        next_message_row = len(rows)
         if not bandgap_text:
             ttk.Label(
                 frame,
@@ -1153,7 +1201,19 @@ class MuellerDecompositionApp(tk.Tk):
                 ),
                 foreground="firebrick",
                 wraplength=760,
-            ).grid(row=len(rows), column=0, columnspan=3, sticky="w", pady=(12, 0))
+            ).grid(row=next_message_row, column=0, columnspan=3, sticky="w", pady=(12, 0))
+            next_message_row += 1
+        warnings_text = "; ".join(str(value) for value in primary.get("math_warnings", []))
+        if warnings_text:
+            ttk.Label(
+                frame,
+                text=(
+                    "Recommended Delta Vb is blank because: "
+                    f"{warnings_text}"
+                ),
+                foreground="firebrick",
+                wraplength=860,
+            ).grid(row=next_message_row, column=0, columnspan=3, sticky="w", pady=(12, 0))
         elif within_tolerance is False:
             ttk.Label(
                 frame,
@@ -1163,7 +1223,7 @@ class MuellerDecompositionApp(tk.Tk):
                 ),
                 foreground="darkorange4",
                 wraplength=760,
-            ).grid(row=len(rows), column=0, columnspan=3, sticky="w", pady=(12, 0))
+            ).grid(row=next_message_row, column=0, columnspan=3, sticky="w", pady=(12, 0))
 
         self.output_notebook.add(frame, text="Results Panel")
         self.dynamic_output_tabs.append(frame)
@@ -1181,35 +1241,44 @@ class MuellerDecompositionApp(tk.Tk):
         columns = (
             "rank",
             "eg",
-            "splitting",
+            "recommended",
+            "raw_splitting",
             "spread",
             "agreement",
             "confidence",
             "basis",
             "components",
+            "quality",
             "stability",
+            "warnings",
         )
         headings = {
             "rank": "#",
             "eg": "Eg eV",
-            "splitting": "Splitting meV",
+            "recommended": "Delta Vb meV",
+            "raw_splitting": "Raw mean meV",
             "spread": "Spread meV",
             "agreement": "Within tol.",
             "confidence": "Confidence",
             "basis": "Basis",
             "components": "Components meV",
+            "quality": "Assignment",
             "stability": "Fit stability",
+            "warnings": "Math warnings",
         }
         widths = {
             "rank": 45,
             "eg": 90,
-            "splitting": 115,
+            "recommended": 110,
+            "raw_splitting": 105,
             "spread": 90,
             "agreement": 85,
             "confidence": 105,
             "basis": 190,
             "components": 160,
+            "quality": 160,
             "stability": 160,
+            "warnings": 340,
         }
         tree = ttk.Treeview(frame, columns=columns, show="headings", height=8)
         for column in columns:
@@ -1227,7 +1296,15 @@ class MuellerDecompositionApp(tk.Tk):
             component_values = ", ".join(
                 f"{float(value):.2f}" for value in match.get("component_splittings_meV", [])
             )
+            recommended = self._format_result_value(
+                match.get("recommended_delta_vb_meV"),
+                2,
+            )
+            quality = ", ".join(match.get("component_assignment_quality", []))
             stability = ", ".join(match.get("component_fit_stability", []))
+            warnings_text = "; ".join(
+                str(warning) for warning in match.get("math_warnings", [])
+            )
             iid = tree.insert(
                 "",
                 "end",
@@ -1238,6 +1315,7 @@ class MuellerDecompositionApp(tk.Tk):
                         if np.isfinite(float(match.get("bandgap_eV", np.nan)))
                         else ""
                     ),
+                    recommended,
                     f"{float(match['splitting_meV']):.2f}",
                     f"{float(match['spread_meV']):.2f}",
                     (
@@ -1248,7 +1326,9 @@ class MuellerDecompositionApp(tk.Tk):
                     match.get("confidence", ""),
                     match.get("basis", ""),
                     component_values,
+                    quality,
                     stability,
+                    warnings_text,
                 ),
             )
             self.result_match_by_iid[iid] = match
@@ -1280,11 +1360,26 @@ class MuellerDecompositionApp(tk.Tk):
             return
         self.db_result_rank.set(str(match.get("rank", "")))
         self.db_eg_eV.set(self._entry_float(match.get("bandgap_eV"), 5))
-        self.db_splitting_meV.set(self._entry_float(match.get("splitting_meV"), 2))
+        recommended = self._entry_float(match.get("recommended_delta_vb_meV"), 2)
+        self.db_splitting_meV.set(recommended)
         basis = str(match.get("basis", ""))
         confidence = str(match.get("confidence", ""))
+        raw_split = self._entry_float(match.get("splitting_meV"), 2)
+        warnings_text = "; ".join(str(value) for value in match.get("math_warnings", []))
         if basis or confidence:
-            self.db_message.set(f"Selected rank {match.get('rank', '')}: {confidence}; {basis}")
+            if recommended:
+                self.db_message.set(
+                    f"Selected rank {match.get('rank', '')}: using recommended "
+                    f"Delta Vb {recommended} meV; {confidence}; {basis}"
+                )
+            else:
+                message = (
+                    f"Selected rank {match.get('rank', '')}: Delta Vb needs manual "
+                    f"review; raw LD/LB mean is {raw_split} meV; {confidence}; {basis}"
+                )
+                if warnings_text:
+                    message = f"{message}; {warnings_text}"
+                self.db_message.set(message)
 
     def _initialize_database_form(self, summary: dict, consensus: dict) -> None:
         sample_id = sdb.default_sample_id(summary.get("dat_path"))
@@ -1354,7 +1449,7 @@ class MuellerDecompositionApp(tk.Tk):
             padx=(8, 8),
             pady=(8, 0),
         )
-        ttk.Label(frame, text="Splitting meV").grid(
+        ttk.Label(frame, text="Delta Vb meV").grid(
             row=3,
             column=1,
             sticky="w",
@@ -1578,7 +1673,7 @@ class MuellerDecompositionApp(tk.Tk):
         try:
             eg = self._parse_required_float("Eg eV", self.db_eg_eV.get())
             splitting = self._parse_required_float(
-                "Valence-band splitting meV",
+                "Delta Vb meV",
                 self.db_splitting_meV.get(),
             )
             bi_percent = self._parse_optional_float("Bi %", self.db_bi_percent.get())
@@ -1594,6 +1689,18 @@ class MuellerDecompositionApp(tk.Tk):
         if self.db_notes_text is not None:
             notes = self.db_notes_text.get("1.0", "end").strip()
         match = self._match_by_rank(self.db_result_rank.get())
+        if match and match.get("requires_manual_delta_vb"):
+            warnings_text = "; ".join(
+                str(value) for value in match.get("math_warnings", [])
+            )
+            proceed = messagebox.askyesno(
+                "Manual Delta Vb",
+                "The selected result failed the automatic Delta Vb math checks. "
+                "Save your manually entered splitting anyway?\n\n"
+                f"{warnings_text}",
+            )
+            if not proceed:
+                return
         summary_path = None
         if self.last_analysis_output is not None:
             summary_path = self.last_analysis_output.get("summary_path")

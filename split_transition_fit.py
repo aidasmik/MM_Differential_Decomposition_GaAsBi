@@ -159,6 +159,12 @@ def _write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
     fields = [
         "rank",
         "bandgap_eV",
+        "recommended_delta_vb_meV",
+        "recommended_delta_source",
+        "kk_splitting_meV",
+        "kk_component_max_difference_meV",
+        "kk_fit_success",
+        "kk_fit_message",
         "bandgap_spread_eV",
         "upper_transition_eV",
         "upper_transition_spread_eV",
@@ -171,6 +177,8 @@ def _write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
         "confidence",
         "basis",
         "energy_windows_overlap",
+        "requires_manual_delta_vb",
+        "math_warnings",
         "component_estimate_ranks",
         "component_terms",
         "component_splittings_meV",
@@ -217,6 +225,9 @@ def _write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
             )
             row["component_fit_stability"] = ";".join(
                 match.get("component_fit_stability", [])
+            )
+            row["math_warnings"] = ";".join(
+                str(warning) for warning in match.get("math_warnings", [])
             )
             row["component_energy_windows_eV"] = ";".join(
                 f"{float(window[0]):.10g}-{float(window[1]):.10g}"
@@ -412,15 +423,38 @@ def main() -> None:
             )
             bandgap = float(primary.get("bandgap_eV", np.nan))
             bandgap_text = f"Eg={bandgap:.5f} eV, " if np.isfinite(bandgap) else ""
+            try:
+                recommended = float(primary.get("recommended_delta_vb_meV", np.nan))
+            except (TypeError, ValueError):
+                recommended = np.nan
+            recommended_text = (
+                f"recommended_delta_vb={recommended:.2f} meV, "
+                if np.isfinite(recommended)
+                else "recommended_delta_vb=manual review, "
+            )
+            try:
+                kk_value = float(primary.get("kk_splitting_meV", np.nan))
+            except (TypeError, ValueError):
+                kk_value = np.nan
+            kk_text = (
+                f"kk_split={kk_value:.2f} meV, "
+                if np.isfinite(kk_value)
+                else ""
+            )
             print(
                 "Results: "
                 f"{bandgap_text}"
-                f"splitting={float(primary['splitting_meV']):.2f} meV "
+                f"{recommended_text}"
+                f"{kk_text}"
+                f"raw_ld_lb_mean={float(primary['splitting_meV']):.2f} meV "
                 f"(components: {values} meV; "
                 f"spread={float(primary['spread_meV']):.2f} meV; "
                 f"{primary['confidence']}; {primary['basis']})"
             )
-            if primary.get("within_agreement_tolerance") is False:
+            warnings_text = "; ".join(primary.get("math_warnings", []))
+            if warnings_text:
+                print(f"  Math warning: {warnings_text}")
+            elif primary.get("within_agreement_tolerance") is False:
                 print(
                     "  Note: energy windows overlap, but the LD/LB splitting "
                     "spread is above the agreement tolerance."
