@@ -4,7 +4,3 @@ Eg_mean,1.23008,eV,
 Eg_std,0.0,eV,
 splitting_mean,45.18,meV,
 splitting_std,0.0,meV,
-Eg_vs_Bi_slope,279.5636363636363,meV/%Bi,linear fit
-Eg_vs_Bi_intercept,0.6150399999999997,eV,linear fit
-splitting_vs_Bi_slope,10.268181818181818,meV/%Bi,linear fit
-splitting_vs_Bi_intercept,22.58999999999999,meV,linear fit

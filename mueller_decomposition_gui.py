@@ -1673,6 +1673,13 @@ class MuellerDecompositionApp(tk.Tk):
                 self.dynamic_output_tabs.remove(tab)
         self.database_plot_tabs.clear()
 
+        summary_tab = self._add_text_file_tab("DB Summary", paths.get("summary"))
+        if summary_tab is not None:
+            self.database_plot_tabs.append(summary_tab)
+        readme_tab = self._add_text_file_tab("DB README", paths.get("readme"))
+        if readme_tab is not None:
+            self.database_plot_tabs.append(readme_tab)
+
         for title, key in (
             ("DB Eg/Bi", "eg_vs_bi_plot"),
             ("DB DeltaVb/Bi", "delta_vb_vs_bi_plot"),
@@ -1817,6 +1824,29 @@ class MuellerDecompositionApp(tk.Tk):
         self.plot_images.append(image)
         canvas.create_image(0, 0, anchor="nw", image=image)
         canvas.configure(scrollregion=(0, 0, image.width(), image.height()))
+
+        self.output_notebook.add(frame, text=title)
+        self.dynamic_output_tabs.append(frame)
+        return frame
+
+    def _add_text_file_tab(self, title: str, path: Path | str | None) -> ttk.Frame | None:
+        if not path:
+            return None
+        text_path = Path(path)
+        if not text_path.exists():
+            return None
+
+        frame = ttk.Frame(self.output_notebook, padding=4)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+        text = scrolledtext.ScrolledText(frame, wrap="none", height=18)
+        text.grid(row=0, column=0, sticky="nsew")
+        try:
+            content = text_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            content = text_path.read_text(encoding="utf-8", errors="replace")
+        text.insert("1.0", content)
+        text.configure(state="disabled")
 
         self.output_notebook.add(frame, text=title)
         self.dynamic_output_tabs.append(frame)
