@@ -1791,6 +1791,48 @@ def detect_decomposition_features(
     }
 
 
+def filter_feature_scan_by_energy(
+    feature_scan: dict[str, Any],
+    *,
+    energy_min: float | None = None,
+    energy_max: float | None = None,
+) -> dict[str, Any]:
+    """Return a feature scan with candidates limited to an energy window.
+
+    Feature detection itself is often more stable when the baseline/noise
+    estimate sees the broader spectrum. This helper lets callers keep that
+    broader context while using only candidates inside the requested physical
+    fitting window for Delta Vb estimation.
+    """
+    if energy_min is None and energy_max is None:
+        return feature_scan
+
+    lower = -np.inf if energy_min is None else float(energy_min)
+    upper = np.inf if energy_max is None else float(energy_max)
+    filtered_features: list[dict[str, Any]] = []
+    for feature in feature_scan.get("features", []):
+        energy = float(feature.get("energy_eV", np.nan))
+        if np.isfinite(energy) and lower <= energy <= upper:
+            filtered = dict(feature)
+            filtered["source_rank"] = filtered.get("rank")
+            filtered_features.append(filtered)
+
+    filtered_features.sort(key=lambda feature: float(feature.get("score", 0.0)), reverse=True)
+    for rank, feature in enumerate(filtered_features, start=1):
+        feature["rank"] = rank
+
+    settings = dict(feature_scan.get("settings", {}))
+    settings["candidate_energy_window_eV"] = (
+        None if energy_min is None else float(energy_min),
+        None if energy_max is None else float(energy_max),
+    )
+    return {
+        **feature_scan,
+        "settings": settings,
+        "features": filtered_features,
+    }
+
+
 def fit_split_transition_to_decomposition(
     result: dict[str, Any],
     term_prefix: str = "linear_dichroism",
@@ -2248,6 +2290,7 @@ def summarize_splitting_consensus(
     estimates: list[dict[str, Any]],
     *,
     agreement_tolerance_meV: float = 7.5,
+    transition_tolerance_meV: float = 12.0,
 ) -> dict[str, Any]:
     """Combine close LD/LB splitting estimates into consensus values."""
     usable = [
@@ -2315,6 +2358,27 @@ def summarize_splitting_consensus(
             finite_lowers = [value for value in lower_transitions if np.isfinite(value)]
             finite_uppers = [value for value in upper_transitions if np.isfinite(value)]
             finite_centers = [value for value in centers if np.isfinite(value)]
+            lower_transition_spread_meV = (
+                1000.0 * float(max(finite_lowers) - min(finite_lowers))
+                if len(finite_lowers) > 1
+                else 0.0
+            )
+            upper_transition_spread_meV = (
+                1000.0 * float(max(finite_uppers) - min(finite_uppers))
+                if len(finite_uppers) > 1
+                else 0.0
+            )
+            center_spread_meV = (
+                1000.0 * float(max(finite_centers) - min(finite_centers))
+                if len(finite_centers) > 1
+                else 0.0
+            )
+            transitions_within_tolerance = bool(
+                lower_transition_spread_meV <= float(transition_tolerance_meV)
+                and upper_transition_spread_meV <= float(transition_tolerance_meV)
+            )
+            if not transitions_within_tolerance:
+                confidence = "provisional"
             if energy_windows_overlap:
                 bandgap_eV = float(np.mean(finite_lowers)) if finite_lowers else np.nan
                 bandgap_spread_eV = (
@@ -2349,6 +2413,11 @@ def summarize_splitting_consensus(
                     "spread_meV": difference,
                     "std_meV": std,
                     "agreement_tolerance_meV": float(agreement_tolerance_meV),
+                    "transition_tolerance_meV": float(transition_tolerance_meV),
+                    "lower_transition_spread_meV": lower_transition_spread_meV,
+                    "upper_transition_spread_meV": upper_transition_spread_meV,
+                    "center_spread_meV": center_spread_meV,
+                    "transitions_within_tolerance": transitions_within_tolerance,
                     "within_agreement_tolerance": within_agreement_tolerance,
                     "confidence": confidence,
                     "basis": _splitting_result_basis(
@@ -2388,6 +2457,7 @@ def summarize_splitting_consensus(
         key=lambda item: (
             not bool(item["energy_windows_overlap"]),
             not bool(item["within_agreement_tolerance"]),
+            not bool(item["transitions_within_tolerance"]),
             confidence_order.get(str(item["confidence"]), 9),
             float(item["spread_meV"]),
             min(item["component_estimate_ranks"]),
@@ -2418,6 +2488,7 @@ def summarize_splitting_consensus(
     return {
         "settings": {
             "agreement_tolerance_meV": float(agreement_tolerance_meV),
+            "transition_tolerance_meV": float(transition_tolerance_meV),
             "required_terms": ("linear_dichroism", "linear_birefringence"),
         },
         "primary": pair_candidates[0] if pair_candidates else None,
@@ -2447,9 +2518,15 @@ def _add_delta_vb_recommendation(primary: dict[str, Any]) -> None:
     """Add conservative Delta Vb recommendation fields to a consensus match."""
     warnings_out: list[str] = []
     tolerance = float(primary.get("agreement_tolerance_meV", 7.5))
+    transition_tolerance = float(primary.get("transition_tolerance_meV", 12.0))
     spread = _finite_or_nan(primary.get("spread_meV"))
+    lower_spread = _finite_or_nan(primary.get("lower_transition_spread_meV"))
+    upper_spread = _finite_or_nan(primary.get("upper_transition_spread_meV"))
     spread_text = f"{spread:.2f}" if np.isfinite(spread) else "unknown"
     tolerance_text = f"{tolerance:.2f}" if np.isfinite(tolerance) else "unknown"
+    transition_tolerance_text = (
+        f"{transition_tolerance:.2f}" if np.isfinite(transition_tolerance) else "unknown"
+    )
 
     if not bool(primary.get("energy_windows_overlap")):
         warnings_out.append("LD/LB energy windows do not overlap.")
@@ -2457,6 +2534,14 @@ def _add_delta_vb_recommendation(primary: dict[str, Any]) -> None:
         warnings_out.append(
             f"LD/LB independent split spread is {spread_text} meV, above "
             f"the {tolerance_text} meV tolerance."
+        )
+    if not bool(primary.get("transitions_within_tolerance")):
+        lower_text = f"{lower_spread:.2f}" if np.isfinite(lower_spread) else "unknown"
+        upper_text = f"{upper_spread:.2f}" if np.isfinite(upper_spread) else "unknown"
+        warnings_out.append(
+            "LD/LB fitted transition energies do not align "
+            f"(lower spread {lower_text} meV, upper spread {upper_text} meV; "
+            f"tolerance {transition_tolerance_text} meV)."
         )
 
     qualities = [str(value) for value in primary.get("component_assignment_quality", [])]
@@ -2525,6 +2610,7 @@ def estimate_valence_band_splittings(
     min_window_width_eV: float = 0.16,
     max_estimates: int = 6,
     consensus_tolerance_meV: float = 7.5,
+    transition_tolerance_meV: float = 12.0,
 ) -> dict[str, Any]:
     """Estimate valence-band splittings from local split-transition fits.
 
@@ -2551,15 +2637,18 @@ def estimate_valence_band_splittings(
                 "min_window_width_eV": float(min_window_width_eV),
                 "max_estimates": int(max_estimates),
                 "consensus_tolerance_meV": float(consensus_tolerance_meV),
+                "transition_tolerance_meV": float(transition_tolerance_meV),
             },
             "estimates": [],
             "consensus": summarize_splitting_consensus(
                 [],
                 agreement_tolerance_meV=consensus_tolerance_meV,
+                transition_tolerance_meV=transition_tolerance_meV,
             ),
             "results": summarize_splitting_consensus(
                 [],
                 agreement_tolerance_meV=consensus_tolerance_meV,
+                transition_tolerance_meV=transition_tolerance_meV,
             ),
             "message": "No energy points available.",
             "note": (
@@ -2707,6 +2796,7 @@ def estimate_valence_band_splittings(
     consensus = summarize_splitting_consensus(
         estimates,
         agreement_tolerance_meV=consensus_tolerance_meV,
+        transition_tolerance_meV=transition_tolerance_meV,
     )
 
     kk_split: dict[str, Any] | None = None
@@ -2761,6 +2851,7 @@ def estimate_valence_band_splittings(
             "min_window_width_eV": float(min_window_width_eV),
             "max_estimates": int(max_estimates),
             "consensus_tolerance_meV": float(consensus_tolerance_meV),
+            "transition_tolerance_meV": float(transition_tolerance_meV),
         },
         "estimates": estimates,
         "consensus": consensus,
@@ -2869,6 +2960,25 @@ def build_short_report_rows(
             primary.get("spread_meV"),
             "meV",
             "LD/LB splitting difference",
+        )
+        add(
+            "main_result",
+            "lower_transition_spread",
+            primary.get("lower_transition_spread_meV"),
+            "meV",
+            "LD/LB lower-transition mismatch",
+        )
+        add(
+            "main_result",
+            "upper_transition_spread",
+            primary.get("upper_transition_spread_meV"),
+            "meV",
+            "LD/LB upper-transition mismatch",
+        )
+        add(
+            "main_result",
+            "transitions_within_tolerance",
+            primary.get("transitions_within_tolerance", ""),
         )
         add("main_result", "upper_transition", primary.get("upper_transition_eV"), "eV")
         add("main_result", "center", primary.get("center_eV"), "eV")

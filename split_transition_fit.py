@@ -173,7 +173,12 @@ def _write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
         "spread_meV",
         "std_meV",
         "agreement_tolerance_meV",
+        "transition_tolerance_meV",
+        "lower_transition_spread_meV",
+        "upper_transition_spread_meV",
+        "center_spread_meV",
         "within_agreement_tolerance",
+        "transitions_within_tolerance",
         "confidence",
         "basis",
         "energy_windows_overlap",
@@ -329,7 +334,11 @@ def main() -> None:
     feature_scan = None
     splitting_estimates = None
     if not args.no_feature_scan:
-        feature_scan = dd.detect_decomposition_features(result)
+        feature_scan = dd.filter_feature_scan_by_energy(
+            dd.detect_decomposition_features(result),
+            energy_min=args.energy_min,
+            energy_max=args.energy_max,
+        )
         _mark_features_inside_fit_window(feature_scan, fit)
         dd.plot_feature_scan(result, feature_scan)
         _write_feature_csv(output_dir / "feature_candidates.csv", feature_scan)

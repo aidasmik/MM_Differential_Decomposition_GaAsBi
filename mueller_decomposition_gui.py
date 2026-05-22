@@ -236,7 +236,12 @@ def write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
         "spread_meV",
         "std_meV",
         "agreement_tolerance_meV",
+        "transition_tolerance_meV",
+        "lower_transition_spread_meV",
+        "upper_transition_spread_meV",
+        "center_spread_meV",
         "within_agreement_tolerance",
+        "transitions_within_tolerance",
         "confidence",
         "basis",
         "energy_windows_overlap",
@@ -402,7 +407,11 @@ def run_analysis(config: dict, progress: queue.Queue) -> dict:
     write_terms_csv(terms_csv, result)
 
     progress.put(("log", "Scanning collapsed spectra for candidate features..."))
-    feature_scan = dd.detect_decomposition_features(result)
+    feature_scan = dd.filter_feature_scan_by_energy(
+        dd.detect_decomposition_features(result),
+        energy_min=config.get("energy_min"),
+        energy_max=config.get("energy_max"),
+    )
     feature_csv = output_dir / "feature_candidates.csv"
     feature_fig = dd.plot_feature_scan(result, feature_scan)
     plt.close(feature_fig)
@@ -1095,6 +1104,14 @@ class MuellerDecompositionApp(tk.Tk):
         recommended_source = str(primary.get("recommended_delta_source", ""))
         splitting_text = self._format_result_value(primary.get("splitting_meV"), 2)
         splitting_spread = self._format_result_value(primary.get("spread_meV"), 2)
+        lower_transition_spread = self._format_result_value(
+            primary.get("lower_transition_spread_meV"),
+            2,
+        )
+        upper_transition_spread = self._format_result_value(
+            primary.get("upper_transition_spread_meV"),
+            2,
+        )
         kk_split = self._format_result_value(primary.get("kk_splitting_meV"), 2)
         agreement_tolerance = self._format_result_value(
             primary.get("agreement_tolerance_meV"),
@@ -1156,6 +1173,16 @@ class MuellerDecompositionApp(tk.Tk):
                 "Splitting spread",
                 f"{splitting_spread} meV" if splitting_spread else "",
                 "Difference between the LD and LB splitting values.",
+            ),
+            (
+                "Transition spread",
+                (
+                    f"lower {lower_transition_spread} meV, "
+                    f"upper {upper_transition_spread} meV"
+                    if lower_transition_spread and upper_transition_spread
+                    else ""
+                ),
+                "LD/LB fitted transition-energy mismatch.",
             ),
             (
                 "LD/LB agreement",
