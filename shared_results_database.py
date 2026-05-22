@@ -275,6 +275,26 @@ def upsert_record(
     return {"jsonl": jsonl, "csv": csv_path, **comparison_paths}
 
 
+def delete_record(
+    record_id: str,
+    database_dir: str | Path = DEFAULT_DATABASE_DIR,
+) -> dict[str, Path | int]:
+    db_dir = Path(database_dir)
+    records = load_records(db_dir)
+    remaining = [
+        record
+        for record in records
+        if str(record.get("record_id", "")) != str(record_id)
+    ]
+    deleted = len(records) - len(remaining)
+    if deleted == 0:
+        raise ValueError(f"No database record found with record_id={record_id!r}.")
+    jsonl = _write_jsonl(remaining, db_dir)
+    csv_path = write_records_csv(remaining, db_dir)
+    comparison_paths = build_comparison_outputs(db_dir, records=remaining)
+    return {"jsonl": jsonl, "csv": csv_path, "deleted": deleted, **comparison_paths}
+
+
 def _run_git(
     database_dir: Path,
     args: list[str],

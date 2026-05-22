@@ -496,6 +496,7 @@ class MuellerDecompositionApp(tk.Tk):
         self.results_tree: ttk.Treeview | None = None
         self.database_tree: ttk.Treeview | None = None
         self.result_match_by_iid: dict[str, dict] = {}
+        self.database_record_by_iid: dict[str, dict] = {}
 
         self.dat_path = tk.StringVar(value="")
         self.output_dir = tk.StringVar(value="")
@@ -1458,15 +1459,31 @@ class MuellerDecompositionApp(tk.Tk):
             sticky="w",
             padx=(8, 0),
         )
-        ttk.Button(actions, text="Refresh Comparisons", command=self._refresh_database_comparisons).grid(
+        ttk.Button(actions, text="Delete Selected", command=self._delete_database_record).grid(
             row=0,
             column=3,
             sticky="w",
             padx=(8, 0),
         )
-        ttk.Button(actions, text="Open Database Folder", command=self._open_database_folder).grid(
+        ttk.Button(
+            actions,
+            text="Delete + Push",
+            command=lambda: self._delete_database_record(push_to_github=True),
+        ).grid(
             row=0,
             column=4,
+            sticky="w",
+            padx=(8, 0),
+        )
+        ttk.Button(actions, text="Refresh Comparisons", command=self._refresh_database_comparisons).grid(
+            row=0,
+            column=5,
+            sticky="w",
+            padx=(8, 0),
+        )
+        ttk.Button(actions, text="Open Database Folder", command=self._open_database_folder).grid(
+            row=0,
+            column=6,
             sticky="w",
             padx=(8, 0),
         )
@@ -1609,13 +1626,14 @@ class MuellerDecompositionApp(tk.Tk):
             return
         for item in self.database_tree.get_children():
             self.database_tree.delete(item)
+        self.database_record_by_iid.clear()
         try:
             records = sdb.sorted_records_for_display(sdb.load_records(self._database_path()))
         except Exception as exc:
             self.db_message.set(f"Could not load database: {exc}")
             return
         for record in records:
-            self.database_tree.insert(
+            iid = self.database_tree.insert(
                 "",
                 "end",
                 values=(
@@ -1630,8 +1648,42 @@ class MuellerDecompositionApp(tk.Tk):
                     record.get("source_file", ""),
                 ),
             )
+            self.database_record_by_iid[iid] = record
         if records:
             self.db_message.set(f"Loaded {len(records)} database record(s).")
+        else:
+            self.db_message.set("Database has no records.")
+
+    def _selected_database_record(self) -> dict | None:
+        if self.database_tree is None:
+            return None
+        selection = self.database_tree.selection()
+        if not selection:
+            return None
+        return self.database_record_by_iid.get(selection[0])
+
+    def _delete_database_record(self, push_to_github: bool = False) -> None:
+        record = self._selected_database_record()
+        if record is None:
+            messagebox.showerror("No database row selected", "Select a row in the database table first.")
+            return
+        sample_id = str(record.get("sample_id", ""))
+        record_id = str(record.get("record_id", ""))
+        if not messagebox.askyesno(
+            "Delete database record",
+            f"Delete {sample_id or record_id} from the shared database?",
+        ):
+            return
+        try:
+            paths = sdb.delete_record(record_id, self._database_path())
+        except Exception as exc:
+            messagebox.showerror("Delete failed", str(exc))
+            return
+        self.db_message.set(f"Deleted {sample_id or record_id} from database.")
+        self._refresh_database_table()
+        self._show_database_comparison_plots(paths)
+        if push_to_github:
+            self._push_database_to_github()
 
     def _refresh_database_comparisons(self) -> None:
         try:
@@ -1876,6 +1928,7 @@ class MuellerDecompositionApp(tk.Tk):
         self.results_tree = None
         self.database_tree = None
         self.result_match_by_iid.clear()
+        self.database_record_by_iid.clear()
         self.last_analysis_output = None
         self.current_summary = None
         self.current_consensus = None
