@@ -311,6 +311,69 @@ def git_remote_url(database_dir: str | Path, remote: str = "origin") -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _same_github_repo_url(url: str) -> bool:
+    normalized = url.strip().removesuffix(".git")
+    expected = GITHUB_DATABASE_URL.removesuffix(".git")
+    ssh_expected = "git@github.com:aidasmik/MM_Differential_Decomposition_GaAsBi"
+    return normalized in {expected, ssh_expected}
+
+
+def find_database_clone(start_dir: str | Path | None = None) -> Path | None:
+    candidates: list[Path] = []
+    if start_dir is not None:
+        start = Path(start_dir)
+        candidates.extend(
+            [
+                start,
+                start / "MM_Differential_Decomposition_GaAsBi",
+                start.parent / "MM_Differential_Decomposition_GaAsBi",
+            ]
+        )
+    home = Path.home()
+    candidates.extend(
+        [
+            home / "MM_Differential_Decomposition_GaAsBi",
+            home / "Desktop" / "MM_Differential_Decomposition_GaAsBi",
+            home / "Desktop" / "FTMC" / "MM_Differential_Decomposition_GaAsBi",
+        ]
+    )
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.expanduser().resolve()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if is_git_database(candidate) and _same_github_repo_url(git_remote_url(candidate)):
+            return candidate
+    return None
+
+
+def clone_database_repo(
+    parent_dir: str | Path,
+    *,
+    repo_url: str = GITHUB_DATABASE_URL,
+    folder_name: str | None = None,
+) -> Path:
+    parent = Path(parent_dir)
+    parent.mkdir(parents=True, exist_ok=True)
+    target_name = folder_name or Path(repo_url.removesuffix(".git")).name
+    target = parent / target_name
+    if target.exists():
+        if is_git_database(target):
+            return target
+        raise ValueError(f"Target exists but is not a Git repository: {target}")
+    result = subprocess.run(
+        ["git", "clone", repo_url, str(target)],
+        text=True,
+        capture_output=True,
+        timeout=180,
+    )
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(f"git clone failed: {details}")
+    return target
+
+
 def commit_and_push_database(
     database_dir: str | Path = DEFAULT_DATABASE_DIR,
     *,
@@ -422,7 +485,7 @@ def _plot_scatter(
 
     fig, ax = plt.subplots(figsize=(7.0, 4.5))
     ax.scatter(x_values, y_values, s=42)
-    if fit_line and len(x_values) >= 2:
+    if fit_line and len(set(float(value) for value in x_values)) >= 2:
         coefficients = np.polyfit(np.asarray(x_values, dtype=float), y_values, 1)
         x_line = np.linspace(min(x_values), max(x_values), 100)
         y_line = coefficients[0] * x_line + coefficients[1]
@@ -491,11 +554,11 @@ def build_comparison_outputs(
                 "",
             ]
         )
-        if len(bi_eg_x) >= 2:
+        if len(set(bi_eg_x)) >= 2:
             slope, intercept = np.polyfit(bi_eg_x, bi_eg_y, 1)
             writer.writerow(["Eg_vs_Bi_slope", 1000.0 * slope, "meV/%Bi", "linear fit"])
             writer.writerow(["Eg_vs_Bi_intercept", intercept, "eV", "linear fit"])
-        if len(bi_split_x) >= 2:
+        if len(set(bi_split_x)) >= 2:
             slope, intercept = np.polyfit(bi_split_x, bi_split_y, 1)
             writer.writerow(
                 ["splitting_vs_Bi_slope", slope, "meV/%Bi", "linear fit"]

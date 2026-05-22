@@ -510,7 +510,10 @@ class MuellerDecompositionApp(tk.Tk):
         self.max_delta_eV = tk.StringVar(value="0.20")
         self.exponent = tk.StringVar(value="-0.5")
         self.status = tk.StringVar(value="Choose a data file to start.")
-        self.database_dir = tk.StringVar(value="shared_database")
+        detected_database = sdb.find_database_clone(Path.cwd())
+        self.database_dir = tk.StringVar(
+            value=str(detected_database or sdb.DEFAULT_DATABASE_DIR)
+        )
         self.db_sample_id = tk.StringVar(value="")
         self.db_bi_percent = tk.StringVar(value="")
         self.db_temperature_c = tk.StringVar(value="")
@@ -1316,6 +1319,12 @@ class MuellerDecompositionApp(tk.Tk):
             column=2,
             sticky="ew",
         )
+        ttk.Button(frame, text="Clone/Setup", command=self._clone_database_repo).grid(
+            row=0,
+            column=3,
+            sticky="ew",
+            padx=(8, 0),
+        )
 
         ttk.Label(frame, text="Sample ID").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=self.db_sample_id).grid(
@@ -1522,6 +1531,20 @@ class MuellerDecompositionApp(tk.Tk):
         if path:
             self.database_dir.set(path)
             self._refresh_database_table()
+
+    def _clone_database_repo(self) -> None:
+        parent = filedialog.askdirectory(title="Select where to clone the GitHub database")
+        if not parent:
+            return
+        try:
+            path = sdb.clone_database_repo(parent)
+        except Exception as exc:
+            messagebox.showerror("Database clone failed", str(exc))
+            self.db_message.set(f"Database clone failed: {exc}")
+            return
+        self.database_dir.set(str(path))
+        self._refresh_database_table()
+        self.db_message.set(f"Database folder set to Git clone: {path}")
 
     def _database_path(self) -> Path:
         text = self.database_dir.get().strip()
