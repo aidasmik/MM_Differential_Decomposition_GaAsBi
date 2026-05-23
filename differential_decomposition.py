@@ -31,31 +31,36 @@ import re
 from typing import Any
 
 import numpy as np
-from scipy.linalg import expm, logm
-from scipy.optimize import least_squares
-from scipy.signal import find_peaks, peak_prominences, savgol_filter
+from scipy.linalg import expm
 
-
-_MATRIX_SHAPE = (4, 4)
-_HC_EV_NM = 1239.8419843320026
-_M00_ATOL = 1.0e-12
-_CONDITION_WARNING_THRESHOLD = 1.0e12
-_IMAG_ABS_WARNING_THRESHOLD = 1.0e-10
-_IMAG_REL_WARNING_THRESHOLD = 1.0e-8
-_RECONSTRUCTION_WARNING_THRESHOLD = 1.0e-8
-_REAL_IF_CLOSE_ABS = 1.0e-12
-_REAL_IF_CLOSE_REL = 1.0e-10
-_SPLIT_TRANSITION_PARAMETER_NAMES = (
-    "center_eV",
-    "delta_eV",
-    "broadening_eV",
-    "amplitude_low",
-    "amplitude_high",
-    "phase_rad",
-    "offset",
-    "slope",
+# Keep these names available through differential_decomposition for existing
+# GUI, CLI, and notebook callers; implementations live in decomposition_math.py.
+from decomposition_math import (
+    _DEFAULT_FEATURE_BASELINE_WIDTHS_EV,
+    _MATRIX_SHAPE,
+    _REAL_IF_CLOSE_ABS,
+    _REAL_IF_CLOSE_REL,
+    _as_numeric_array,
+    _local_split_initial_guesses,
+    _spectrum_component,
+    _windowed_signal_scale,
+    collapse_twofold_anisotropy_spectrum,
+    critical_point_profile,
+    decompose_generator_terms,
+    decompose_mueller_log,
+    detect_spectral_features,
+    estimate_direct_derivative_split_spectrum,
+    fit_kk_consistent_split_spectra,
+    fit_split_transition_spectrum,
+    kk_split_model,
+    matrix_log_batch,
+    normalize_mueller,
+    reconstruction_error,
+    remove_isotropic_part,
+    split_transition_model,
 )
-_DEFAULT_FEATURE_BASELINE_WIDTHS_EV = (0.08, 0.12, 0.20, 0.35, 0.60, 0.90)
+
+_HC_EV_NM = 1239.8419843320026
 
 
 _TERM_LABELS = {
@@ -78,121 +83,6 @@ _MM_LABEL_TO_INDEX = {
     for col in range(1, 5)
 }
 _COMPLETEEASE_NON_MUELLER_DATA_LABELS = {"E", "dPolE", "uR", "AnE", "Aps", "Asp"}
-
-
-def _as_numeric_array(values: Any) -> np.ndarray:
-    """Return values as float64 or complex128 without discarding complex input."""
-    arr = np.asarray(values)
-    if np.iscomplexobj(arr):
-        return arr.astype(np.complex128, copy=False)
-    return arr.astype(np.float64, copy=False)
-
-
-def _validate_mueller_shape(M: np.ndarray, name: str = "M") -> None:
-    if M.ndim < 2 or M.shape[-2:] != _MATRIX_SHAPE:
-        raise ValueError(
-            f"{name} must have shape (4, 4) or (..., 4, 4); got {M.shape}."
-        )
-
-
-def _is_single_matrix(M: np.ndarray) -> bool:
-    return M.ndim == 2
-
-
-def _flatten_matrices(M: np.ndarray) -> tuple[np.ndarray, tuple[int, ...], bool]:
-    single = _is_single_matrix(M)
-    batch_shape = () if single else M.shape[:-2]
-    return M.reshape((-1, 4, 4)), batch_shape, single
-
-
-def _restore_batch(values: np.ndarray, batch_shape: tuple[int, ...], single: bool) -> Any:
-    arr = np.asarray(values).reshape(batch_shape)
-    if single:
-        return arr[()]
-    return arr
-
-
-def _mask_count(mask: np.ndarray) -> int:
-    return int(np.count_nonzero(np.asarray(mask)))
-
-
-def _sample_indices(mask: np.ndarray, max_items: int = 8) -> str:
-    mask_arr = np.asarray(mask)
-    if mask_arr.shape == ():
-        return "[()]" if bool(mask_arr) else "[]"
-    indices = np.argwhere(mask_arr)
-    shown = [tuple(int(v) for v in row) for row in indices[:max_items]]
-    suffix = ", ..." if len(indices) > max_items else ""
-    return f"{shown}{suffix}"
-
-
-def _add_mask_warning(
-    warnings_out: list[str],
-    mask: np.ndarray,
-    message: str,
-    total_count: int,
-) -> None:
-    count = _mask_count(mask)
-    if count:
-        warnings_out.append(
-            f"{message}: {count}/{total_count} matrix/matrices; "
-            f"indices {_sample_indices(mask)}."
-        )
-
-
-def _matrix_norms(flat_matrices: np.ndarray) -> np.ndarray:
-    return np.array([np.linalg.norm(matrix) for matrix in flat_matrices], dtype=np.float64)
-
-
-def _real_if_close_per_matrix(
-    matrices: np.ndarray,
-    abs_tol: float = _REAL_IF_CLOSE_ABS,
-    rel_tol: float = _REAL_IF_CLOSE_REL,
-) -> np.ndarray:
-    """Drop imaginary parts only for matrices whose imaginary norm is negligible."""
-    arr = np.asarray(matrices)
-    if not np.iscomplexobj(arr):
-        return arr
-
-    flat, batch_shape, single = _flatten_matrices(arr)
-    out = flat.astype(np.complex128, copy=True)
-    close_mask = np.zeros(flat.shape[0], dtype=bool)
-
-    for index, matrix in enumerate(flat):
-        imag_norm = np.linalg.norm(np.imag(matrix))
-        real_norm = np.linalg.norm(np.real(matrix))
-        close_mask[index] = imag_norm <= abs_tol + rel_tol * max(1.0, real_norm)
-        if close_mask[index]:
-            out[index] = np.real(matrix)
-
-    reshaped = out.reshape((1, 4, 4) if single else batch_shape + (4, 4))
-    if bool(np.all(close_mask)):
-        return np.real(reshaped[0] if single else reshaped)
-    return reshaped[0] if single else reshaped
-
-
-def _angle_from_components(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Return 0.5 atan2(y, x) in degrees, or NaN for significant complex input."""
-    x_arr = np.asarray(x)
-    y_arr = np.asarray(y)
-    angle = 0.5 * np.degrees(np.arctan2(np.real(y_arr), np.real(x_arr)))
-
-    if np.iscomplexobj(x_arr) or np.iscomplexobj(y_arr):
-        scale = np.maximum.reduce(
-            [
-                np.ones_like(np.real(x_arr), dtype=np.float64),
-                np.abs(np.real(x_arr)),
-                np.abs(np.real(y_arr)),
-            ]
-        )
-        significant_imag = (
-            np.abs(np.imag(x_arr)) > _REAL_IF_CLOSE_ABS + _REAL_IF_CLOSE_REL * scale
-        ) | (
-            np.abs(np.imag(y_arr)) > _REAL_IF_CLOSE_ABS + _REAL_IF_CLOSE_REL * scale
-        )
-        angle = np.where(significant_imag, np.nan, angle)
-
-    return angle
 
 
 def _coerce_for_plot(values: np.ndarray) -> tuple[np.ndarray, np.ndarray | None]:
@@ -234,35 +124,6 @@ def _save_figure_if_requested(fig: Any, result: dict[str, Any], filename: str) -
 def _safe_filename(text: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", text.strip())
     return safe.strip("_") or "plot"
-
-
-def normalize_mueller(M: np.ndarray) -> np.ndarray:
-    """Normalize Mueller matrices by their M[0, 0] element.
-
-    Parameters
-    ----------
-    M:
-        A single Mueller matrix with shape (4, 4), or a batch with shape
-        (..., 4, 4).
-
-    Returns
-    -------
-    numpy.ndarray
-        M / M[0, 0] for every matrix in the batch.
-
-    Notes
-    -----
-    For transmission data, M[0, 0] carries the absolute transmission scale. A
-    scalar scale factor in M appears as an identity-matrix contribution in
-    log(M), so this normalization removes absolute transmission before
-    extracting anisotropic polarization effects. If M[0, 0] is close to zero,
-    the caller should inspect diagnostics from decompose_mueller_log.
-    """
-    arr = _as_numeric_array(M)
-    _validate_mueller_shape(arr)
-    denominator = arr[..., 0, 0][..., np.newaxis, np.newaxis]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return arr / denominator
 
 
 def _parse_completeease_float(text: str) -> float:
@@ -549,388 +410,6 @@ def read_woollam_dat(
     }
 
 
-def _matrix_log_batch_with_status(M: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    arr = _as_numeric_array(M)
-    _validate_mueller_shape(arr)
-    flat, batch_shape, single = _flatten_matrices(arr)
-
-    logs = np.empty((flat.shape[0], 4, 4), dtype=np.complex128)
-    failures = np.zeros(flat.shape[0], dtype=bool)
-
-    for index, matrix in enumerate(flat):
-        if not np.all(np.isfinite(matrix)):
-            logs[index] = np.nan + 0.0j
-            failures[index] = True
-            continue
-        try:
-            logged = logm(matrix)
-        except Exception:
-            logs[index] = np.nan + 0.0j
-            failures[index] = True
-            continue
-
-        logs[index] = logged
-        if not np.all(np.isfinite(logs[index])):
-            failures[index] = True
-
-    if single:
-        return logs[0], failures.reshape(())
-    return logs.reshape(batch_shape + (4, 4)), failures.reshape(batch_shape)
-
-
-def matrix_log_batch(M: np.ndarray) -> np.ndarray:
-    """Compute scipy.linalg.logm for one Mueller matrix or a batch.
-
-    Parameters
-    ----------
-    M:
-        Shape (4, 4) or (..., 4, 4).
-
-    Returns
-    -------
-    numpy.ndarray
-        Matrix logarithms with the same leading batch shape as M. Complex
-        values are retained because a significant imaginary part can indicate a
-        branch, noise, or physical-consistency issue that should be diagnosed.
-    """
-    logged, _ = _matrix_log_batch_with_status(M)
-    return logged
-
-
-def reconstruction_error(M: np.ndarray, L: np.ndarray) -> np.ndarray:
-    """Return ||expm(L) - M|| / ||M|| for one matrix or a batch.
-
-    The reconstruction error checks whether the computed logarithm is a useful
-    generator of the input matrix. For differential matrices m = log(M) / d,
-    pass the integrated generator L = m d to this function.
-    """
-    M_arr = _as_numeric_array(M)
-    L_arr = _as_numeric_array(L)
-    _validate_mueller_shape(M_arr, "M")
-    _validate_mueller_shape(L_arr, "L")
-    if M_arr.shape != L_arr.shape:
-        raise ValueError(f"M and L must have the same shape; got {M_arr.shape} and {L_arr.shape}.")
-
-    flat_M, batch_shape, single = _flatten_matrices(M_arr)
-    flat_L, _, _ = _flatten_matrices(L_arr)
-    errors = np.empty(flat_M.shape[0], dtype=np.float64)
-
-    for index, (matrix, generator) in enumerate(zip(flat_M, flat_L)):
-        if not np.all(np.isfinite(matrix)) or not np.all(np.isfinite(generator)):
-            errors[index] = np.nan
-            continue
-        try:
-            reconstructed = expm(generator)
-        except Exception:
-            errors[index] = np.nan
-            continue
-
-        denominator = np.linalg.norm(matrix)
-        numerator = np.linalg.norm(reconstructed - matrix)
-        if denominator == 0.0:
-            errors[index] = 0.0 if numerator == 0.0 else np.inf
-        else:
-            errors[index] = float(numerator / denominator)
-
-    return _restore_batch(errors, batch_shape, single)
-
-
-def remove_isotropic_part(L: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Remove the scalar isotropic part trace(L) / 4 from a generator.
-
-    Parameters
-    ----------
-    L:
-        Integrated generator L or differential generator m with shape
-        (4, 4) or (..., 4, 4).
-
-    Returns
-    -------
-    tuple
-        (L_aniso, isotropic_attenuation), where
-
-            L_aniso = L - trace(L) / 4 * I.
-
-    Notes
-    -----
-    The trace term represents scalar isotropic attenuation in this effective
-    generator convention. Subtracting it leaves the anisotropic generator terms
-    used for dichroism and retardance interpretation.
-    """
-    arr = _as_numeric_array(L)
-    _validate_mueller_shape(arr, "L")
-    isotropic = np.trace(arr, axis1=-2, axis2=-1) / 4.0
-    eye = np.eye(4, dtype=arr.dtype)
-    anisotropic = arr - np.asarray(isotropic)[..., np.newaxis, np.newaxis] * eye
-    return anisotropic, isotropic
-
-
-def decompose_generator_terms(L: np.ndarray) -> dict[str, np.ndarray]:
-    """Extract approximate differential Mueller generator terms.
-
-    The extraction uses the convention
-
-        L =
-        [[ a,  LD_x,  LD_y,  CD  ],
-         [ LD_x, a,   CB,   -LB_y],
-         [ LD_y, -CB, a,    LB_x ],
-         [ CD,   LB_y,-LB_x, a    ]]
-
-    where LD_x and LD_y are linear dichroism components, CD is circular
-    dichroism, LB_x and LB_y are linear birefringence / linear retardance
-    components, CB is circular birefringence / optical rotation, and a is
-    isotropic attenuation.
-
-    This is a practical extraction convention for an effective differential
-    generator. Signs, axis definitions, Stokes-vector ordering, and handedness
-    must be checked against the exact Mueller convention used by the RC2 export
-    pipeline before assigning final physical signs.
-    """
-    arr = _as_numeric_array(L)
-    _validate_mueller_shape(arr, "L")
-
-    isotropic_attenuation = np.trace(arr, axis1=-2, axis2=-1) / 4.0
-    linear_dichroism_x = 0.5 * (arr[..., 0, 1] + arr[..., 1, 0])
-    linear_dichroism_y = 0.5 * (arr[..., 0, 2] + arr[..., 2, 0])
-    circular_dichroism = 0.5 * (arr[..., 0, 3] + arr[..., 3, 0])
-    linear_birefringence_x = 0.5 * (arr[..., 2, 3] - arr[..., 3, 2])
-    linear_birefringence_y = 0.5 * (arr[..., 3, 1] - arr[..., 1, 3])
-    circular_birefringence = 0.5 * (arr[..., 1, 2] - arr[..., 2, 1])
-
-    linear_dichroism_magnitude = np.sqrt(linear_dichroism_x**2 + linear_dichroism_y**2)
-    linear_birefringence_magnitude = np.sqrt(
-        linear_birefringence_x**2 + linear_birefringence_y**2
-    )
-    dichroism_axis_angle_deg = _angle_from_components(
-        linear_dichroism_x, linear_dichroism_y
-    )
-    birefringence_axis_angle_deg = _angle_from_components(
-        linear_birefringence_x, linear_birefringence_y
-    )
-
-    return {
-        "isotropic_attenuation": isotropic_attenuation,
-        "linear_dichroism_x": linear_dichroism_x,
-        "linear_dichroism_y": linear_dichroism_y,
-        "circular_dichroism": circular_dichroism,
-        "linear_birefringence_x": linear_birefringence_x,
-        "linear_birefringence_y": linear_birefringence_y,
-        "circular_birefringence": circular_birefringence,
-        "linear_dichroism_magnitude": linear_dichroism_magnitude,
-        "linear_birefringence_magnitude": linear_birefringence_magnitude,
-        "dichroism_axis_angle_deg": dichroism_axis_angle_deg,
-        "birefringence_axis_angle_deg": birefringence_axis_angle_deg,
-    }
-
-
-def _condition_numbers(M: np.ndarray) -> np.ndarray:
-    flat, batch_shape, single = _flatten_matrices(M)
-    values = np.empty(flat.shape[0], dtype=np.float64)
-    for index, matrix in enumerate(flat):
-        if not np.all(np.isfinite(matrix)):
-            values[index] = np.inf
-            continue
-        try:
-            values[index] = float(np.linalg.cond(matrix))
-        except Exception:
-            values[index] = np.inf
-    return np.asarray(_restore_batch(values, batch_shape, single))
-
-
-def _generator_imaginary_diagnostics(L: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    flat, batch_shape, single = _flatten_matrices(np.asarray(L))
-    imag_norm = _matrix_norms(np.imag(flat))
-    total_norm = _matrix_norms(flat)
-    relative = imag_norm / np.maximum(1.0, total_norm)
-    return (
-        np.asarray(_restore_batch(imag_norm, batch_shape, single)),
-        np.asarray(_restore_batch(relative, batch_shape, single)),
-    )
-
-
-def _any_nonfinite_by_matrix(M: np.ndarray) -> np.ndarray:
-    flat, batch_shape, single = _flatten_matrices(M)
-    mask = np.array([not np.all(np.isfinite(matrix)) for matrix in flat], dtype=bool)
-    return np.asarray(_restore_batch(mask, batch_shape, single))
-
-
-def decompose_mueller_log(
-    M: np.ndarray,
-    thickness: float | None = None,
-    normalize: bool = True,
-    remove_isotropic_attenuation: bool = True,
-    real_if_close: bool = True,
-    check_physical: bool = True,
-) -> dict[str, Any]:
-    """Logarithmically decompose one Mueller matrix or a batch.
-
-    Parameters
-    ----------
-    M:
-        A single measured transmission Mueller matrix with shape (4, 4), or a
-        stack with shape (..., 4, 4).
-    thickness:
-        Optional sample thickness. If omitted, this returns the integrated
-        generator L = log(M). If provided, this returns the effective
-        differential generator m = log(M) / thickness. The units of m are the
-        inverse of the units used for thickness.
-    normalize:
-        If True, divide every Mueller matrix by M[0, 0] before taking the
-        logarithm. This removes absolute transmission. The removed scalar scale
-        appears as an isotropic identity contribution in the generator.
-    remove_isotropic_attenuation:
-        If True, also return an anisotropic generator with trace(L) / 4 removed.
-    real_if_close:
-        If True, tiny numerical imaginary parts from scipy.linalg.logm are
-        converted to real values. Significant imaginary parts are retained and
-        reported in diagnostics.
-    check_physical:
-        If True, populate diagnostic warnings for near-zero M[0, 0],
-        non-finite entries, large condition number, significant imaginary log
-        components, and poor expm(logm(M)) reconstruction.
-
-    Returns
-    -------
-    dict
-        Dictionary containing generator_full, generator_aniso, L_full, L_aniso,
-        isotropic_attenuation, terms, diagnostics, normalized_mueller,
-        thickness, and is_differential.
-
-    Notes
-    -----
-    This is an effective homogeneous-slab decomposition. For layered,
-    depolarizing, strongly scattering, or multiple-reflection dominated samples,
-    the result is an effective integrated generator of the measured Mueller
-    matrix, not necessarily a unique local material tensor.
-    """
-    M_input = _as_numeric_array(M)
-    _validate_mueller_shape(M_input)
-    flat_input, batch_shape, single = _flatten_matrices(M_input)
-    total_count = flat_input.shape[0]
-
-    if thickness is not None:
-        thickness_value = float(thickness)
-        if not np.isfinite(thickness_value) or thickness_value <= 0.0:
-            raise ValueError("thickness must be a finite positive scalar when provided.")
-    else:
-        thickness_value = None
-
-    m00 = M_input[..., 0, 0]
-    m00_close = np.abs(m00) <= _M00_ATOL
-    nonfinite_input = _any_nonfinite_by_matrix(M_input)
-
-    M_for_log = normalize_mueller(M_input) if normalize else M_input.copy()
-    nonfinite_normalized = _any_nonfinite_by_matrix(M_for_log)
-    condition_number = _condition_numbers(M_for_log)
-
-    log_M, logm_failures = _matrix_log_batch_with_status(M_for_log)
-    reconstruction = np.asarray(reconstruction_error(M_for_log, log_M))
-
-    generator_full = log_M / thickness_value if thickness_value is not None else log_M
-    imag_norm, imag_relative_norm = _generator_imaginary_diagnostics(generator_full)
-
-    high_imaginary = (
-        (imag_norm > _IMAG_ABS_WARNING_THRESHOLD)
-        & (imag_relative_norm > _IMAG_REL_WARNING_THRESHOLD)
-    )
-    large_condition = condition_number > _CONDITION_WARNING_THRESHOLD
-    large_reconstruction_error = reconstruction > _RECONSTRUCTION_WARNING_THRESHOLD
-
-    if real_if_close:
-        generator_full = _real_if_close_per_matrix(generator_full)
-
-    if remove_isotropic_attenuation:
-        generator_aniso, isotropic_attenuation = remove_isotropic_part(generator_full)
-    else:
-        generator_aniso = np.array(generator_full, copy=True)
-        isotropic_attenuation = np.trace(generator_full, axis1=-2, axis2=-1) / 4.0
-
-    diagnostics_warnings: list[str] = []
-    if check_physical:
-        _add_mask_warning(
-            diagnostics_warnings,
-            np.asarray(m00_close),
-            "M[0, 0] is close to zero",
-            total_count,
-        )
-        _add_mask_warning(
-            diagnostics_warnings,
-            np.asarray(nonfinite_input),
-            "Input Mueller matrix contains non-finite values",
-            total_count,
-        )
-        _add_mask_warning(
-            diagnostics_warnings,
-            np.asarray(nonfinite_normalized),
-            "Normalized Mueller matrix contains non-finite values",
-            total_count,
-        )
-        _add_mask_warning(
-            diagnostics_warnings,
-            np.asarray(large_condition),
-            f"Condition number exceeds {_CONDITION_WARNING_THRESHOLD:.1e}",
-            total_count,
-        )
-        _add_mask_warning(
-            diagnostics_warnings,
-            np.asarray(high_imaginary),
-            "Matrix logarithm has significant imaginary component",
-            total_count,
-        )
-        _add_mask_warning(
-            diagnostics_warnings,
-            np.asarray(large_reconstruction_error),
-            f"expm(logm(M)) reconstruction error exceeds {_RECONSTRUCTION_WARNING_THRESHOLD:.1e}",
-            total_count,
-        )
-        _add_mask_warning(
-            diagnostics_warnings,
-            np.asarray(logm_failures),
-            "Matrix logarithm failed or returned non-finite values",
-            total_count,
-        )
-
-    diagnostics = {
-        "warnings": diagnostics_warnings,
-        "input_shape": M_input.shape,
-        "batch_shape": batch_shape,
-        "normalized": normalize,
-        "thickness": thickness_value,
-        "m00": m00,
-        "m00_close_to_zero": m00_close,
-        "nonfinite_input": nonfinite_input,
-        "nonfinite_normalized": nonfinite_normalized,
-        "condition_number": condition_number,
-        "large_condition_number": large_condition,
-        "logm_failures": logm_failures,
-        "logm_imag_norm": imag_norm,
-        "logm_imag_relative_norm": imag_relative_norm,
-        "high_imaginary_part": high_imaginary,
-        "reconstruction_error": reconstruction,
-        "large_reconstruction_error": large_reconstruction_error,
-        "thresholds": {
-            "m00_atol": _M00_ATOL,
-            "condition_number": _CONDITION_WARNING_THRESHOLD,
-            "imag_abs": _IMAG_ABS_WARNING_THRESHOLD,
-            "imag_relative": _IMAG_REL_WARNING_THRESHOLD,
-            "reconstruction_error": _RECONSTRUCTION_WARNING_THRESHOLD,
-        },
-    }
-
-    return {
-        "generator_full": generator_full,
-        "generator_aniso": generator_aniso,
-        "L_full": generator_full,
-        "L_aniso": generator_aniso,
-        "isotropic_attenuation": isotropic_attenuation,
-        "terms": decompose_generator_terms(generator_full),
-        "diagnostics": diagnostics,
-        "normalized_mueller": M_for_log,
-        "thickness": thickness_value,
-        "is_differential": thickness_value is not None,
-    }
-
-
 def _orient_dataset(
     mueller: np.ndarray, energy_eV: np.ndarray, rotations_deg: np.ndarray
 ) -> tuple[np.ndarray, str]:
@@ -1061,646 +540,47 @@ def decompose_woollam_dat(
     return result
 
 
-def _spectrum_component(values: np.ndarray, component: str) -> np.ndarray:
-    arr = np.asarray(values)
-    if component == "real":
-        return np.real(arr)
-    if component == "imag":
-        return np.imag(arr)
-    if component == "abs":
-        return np.abs(arr)
-    if component == "complex":
-        return arr.astype(np.complex128, copy=False)
-    raise ValueError("component must be one of: 'real', 'imag', 'abs', 'complex'.")
-
-
-def _stack_residuals(residual: np.ndarray) -> np.ndarray:
-    arr = np.asarray(residual)
-    if np.iscomplexobj(arr):
-        return np.concatenate([np.real(arr), np.imag(arr)])
-    return arr.astype(np.float64, copy=False)
-
-
-def _mad_scale(values: np.ndarray) -> float:
-    arr = np.asarray(values, dtype=np.float64)
-    arr = arr[np.isfinite(arr)]
-    if arr.size == 0:
-        return 1.0
-    median = float(np.median(arr))
-    mad = float(np.median(np.abs(arr - median)))
-    if mad > 0.0:
-        return 1.4826 * mad
-    std = float(np.std(arr))
-    if std > 0.0:
-        return std
-    return max(1.0, abs(median))
-
-
-def _energy_step_eV(energy: np.ndarray) -> float:
-    sorted_energy = np.sort(np.asarray(energy, dtype=np.float64))
-    diffs = np.diff(sorted_energy)
-    diffs = np.abs(diffs[np.isfinite(diffs) & (np.abs(diffs) > 0.0)])
-    if diffs.size == 0:
-        return 1.0
-    return float(np.nanmedian(diffs))
-
-
-def _odd_window_points(
-    energy: np.ndarray,
-    width_eV: float,
+def estimate_direct_derivative_split_to_decomposition(
+    result: dict[str, Any],
     *,
-    minimum: int = 5,
-) -> int:
-    step = _energy_step_eV(energy)
-    if not np.isfinite(step) or step <= 0.0:
-        step = 1.0
-    points = max(int(minimum), int(round(abs(float(width_eV)) / step)))
-    if points % 2 == 0:
-        points += 1
-    return points
-
-
-def _running_nanmedian(values: np.ndarray, window_points: int) -> np.ndarray:
-    arr = np.asarray(values, dtype=np.float64)
-    output = np.empty_like(arr)
-    half_width = max(0, int(window_points) // 2)
-    for index in range(arr.size):
-        start = max(0, index - half_width)
-        stop = min(arr.size, index + half_width + 1)
-        output[index] = np.nanmedian(arr[start:stop])
-    return output
-
-
-def _running_mad_scale(values: np.ndarray, window_points: int) -> np.ndarray:
-    arr = np.asarray(values, dtype=np.float64)
-    output = np.empty_like(arr)
-    half_width = max(0, int(window_points) // 2)
-    for index in range(arr.size):
-        start = max(0, index - half_width)
-        stop = min(arr.size, index + half_width + 1)
-        window = arr[start:stop]
-        median = float(np.nanmedian(window))
-        mad = float(np.nanmedian(np.abs(window - median)))
-        scale = 1.4826 * mad
-        if not np.isfinite(scale) or scale <= 0.0:
-            scale = float(np.nanstd(window))
-        output[index] = scale if np.isfinite(scale) else np.nan
-    return output
-
-
-def _critical_point_complex_profile(
-    energy_eV: np.ndarray,
-    transition_energy_eV: float,
-    broadening_eV: float,
-    exponent: float,
-) -> np.ndarray:
-    energy = np.asarray(energy_eV, dtype=np.float64)
-    gamma = float(broadening_eV)
-    if not np.isfinite(gamma) or gamma <= 0.0:
-        raise ValueError("broadening_eV must be finite and positive.")
-
-    z = energy - float(transition_energy_eV) + 1j * gamma
-    if abs(float(exponent)) <= 1.0e-14:
-        profile = np.log(z)
-    else:
-        profile = z ** float(exponent)
-
-    scale = float(np.nanmax(np.abs(profile))) if profile.size else 1.0
-    if scale > 0.0 and np.isfinite(scale):
-        profile = profile / scale
-    return profile
-
-
-def critical_point_profile(
-    energy_eV: np.ndarray,
-    transition_energy_eV: float,
-    broadening_eV: float,
-    exponent: float = -0.5,
-    phase_rad: float = 0.0,
-    component: str = "real",
-) -> np.ndarray:
-    """Return a normalized complex critical-point oscillator profile.
-
-    ``exponent=-0.5`` is the common 3D M0 Aspnes critical-point shape;
-    ``exponent=0`` uses a logarithmic profile. The returned profile is
-    normalized over the supplied energy axis so fitted amplitudes are on the
-    same scale as the input spectrum.
-    """
-    profile = np.exp(1j * float(phase_rad)) * _critical_point_complex_profile(
-        energy_eV,
-        transition_energy_eV,
-        broadening_eV,
-        exponent,
-    )
-    return _spectrum_component(profile, component)
-
-
-def split_transition_model(
-    energy_eV: np.ndarray,
-    center_eV: float,
-    delta_eV: float,
-    broadening_eV: float,
-    amplitude_low: float,
-    amplitude_high: float,
-    phase_rad: float = 0.0,
-    offset: float = 0.0,
-    slope: float = 0.0,
-    exponent: float = -0.5,
-    component: str = "real",
-) -> np.ndarray:
-    """Model a spectrum as two polarization-dependent critical points.
-
-    The two transitions are centered at ``center_eV - delta_eV / 2`` and
-    ``center_eV + delta_eV / 2``. For a linear-dichroism spectrum, the two
-    amplitudes naturally represent the response of the two orthogonal
-    polarization channels in the anisotropic difference signal.
-    """
-    energy = np.asarray(energy_eV, dtype=np.float64)
-    center = float(center_eV)
-    delta = abs(float(delta_eV))
-    low_energy = center - 0.5 * delta
-    high_energy = center + 0.5 * delta
-
-    low_profile = _critical_point_complex_profile(
-        energy, low_energy, broadening_eV, exponent
-    )
-    high_profile = _critical_point_complex_profile(
-        energy, high_energy, broadening_eV, exponent
-    )
-    model = np.exp(1j * float(phase_rad)) * (
-        float(amplitude_low) * low_profile + float(amplitude_high) * high_profile
-    )
-
-    energy_ref = float(np.nanmean(energy)) if energy.size else 0.0
-    model = model + float(offset) + float(slope) * (energy - energy_ref)
-    return _spectrum_component(model, component)
-
-
-def _split_transition_initial_guess(
-    energy: np.ndarray,
-    values: np.ndarray,
-    max_delta_eV: float | None,
-) -> dict[str, float]:
-    y = np.asarray(values)
-    y_real = np.real(y) if np.iscomplexobj(y) else y.astype(np.float64, copy=False)
-    finite = np.isfinite(energy) & np.isfinite(y_real)
-    e = energy[finite]
-    yr = y_real[finite]
-
-    if e.size < 8:
-        raise ValueError("At least 8 finite data points are required for a split fit.")
-
-    span = float(e[-1] - e[0])
-    step = float(np.nanmedian(np.diff(e))) if e.size > 1 else span
-    baseline = float(np.nanmedian(yr))
-    detrended = yr - baseline
-    scale = float(np.nanpercentile(np.abs(detrended), 90))
-    if not np.isfinite(scale) or scale <= 0.0:
-        scale = max(float(np.nanstd(yr)), 1.0)
-
-    peak_index = int(np.nanargmax(np.abs(detrended)))
-    delta_guess = min(0.040, max(0.010, 0.15 * span))
-    if max_delta_eV is not None:
-        delta_guess = min(delta_guess, 0.5 * float(max_delta_eV))
-    broadening_guess = max(0.010, 3.0 * abs(step))
-
-    return {
-        "center_eV": float(e[peak_index]),
-        "delta_eV": delta_guess,
-        "broadening_eV": broadening_guess,
-        "amplitude_low": scale,
-        "amplitude_high": -scale,
-        "phase_rad": 0.0,
-        "offset": baseline,
-        "slope": 0.0,
-    }
-
-
-def _split_transition_bounds(
-    energy: np.ndarray,
-    values: np.ndarray,
-    max_delta_eV: float | None,
-) -> tuple[np.ndarray, np.ndarray]:
-    e_min = float(np.nanmin(energy))
-    e_max = float(np.nanmax(energy))
-    span = max(e_max - e_min, 1.0e-6)
-    step = float(np.nanmedian(np.diff(energy))) if energy.size > 1 else span
-    y = np.asarray(values)
-    y_scale = float(np.nanpercentile(np.abs(_stack_residuals(y)), 95))
-    if not np.isfinite(y_scale) or y_scale <= 0.0:
-        y_scale = 1.0
-
-    delta_upper = 0.25 * span if max_delta_eV is None else float(max_delta_eV)
-    delta_upper = max(delta_upper, max(0.010, 2.0 * abs(step)))
-    broadening_lower = max(1.0e-5, 0.25 * abs(step))
-    broadening_upper = max(0.5 * span, 10.0 * broadening_lower)
-    amplitude_bound = 20.0 * y_scale
-    offset_bound = 20.0 * y_scale
-    slope_bound = 20.0 * y_scale / span
-
-    lower = np.array(
-        [
-            e_min,
-            0.0,
-            broadening_lower,
-            -amplitude_bound,
-            -amplitude_bound,
-            -np.pi,
-            -offset_bound,
-            -slope_bound,
-        ],
-        dtype=np.float64,
-    )
-    upper = np.array(
-        [
-            e_max,
-            delta_upper,
-            broadening_upper,
-            amplitude_bound,
-            amplitude_bound,
-            np.pi,
-            offset_bound,
-            slope_bound,
-        ],
-        dtype=np.float64,
-    )
-    return lower, upper
-
-
-def fit_split_transition_spectrum(
-    energy_eV: np.ndarray,
-    values: np.ndarray,
+    term_prefix: str = "linear_dichroism",
     energy_min: float | None = None,
     energy_max: float | None = None,
-    exponent: float = -0.5,
+    vector_part: str = "real",
     component: str = "real",
-    initial: dict[str, float] | None = None,
-    max_delta_eV: float | None = 0.30,
-    robust_scale: float | None = None,
-    loss: str = "soft_l1",
-) -> dict[str, Any]:
-    """Fit one anisotropic spectrum with the split-transition model.
-
-    The fitted ``delta_eV`` is the transition separation. Use
-    ``delta_meV = 1000 * delta_eV`` from the returned ``parameters`` dict for
-    the usual meV scale check.
-    """
-    energy = np.asarray(energy_eV, dtype=np.float64)
-    raw_values = np.asarray(values)
-    if energy.ndim != 1:
-        raise ValueError(f"energy_eV must be one-dimensional; got {energy.shape}.")
-    if raw_values.shape != energy.shape:
-        raise ValueError(
-            f"values must have shape {energy.shape}; got {raw_values.shape}."
-        )
-
-    target = _spectrum_component(raw_values, component)
-    finite = np.isfinite(energy) & np.isfinite(_stack_residuals(target)[: energy.size])
-    if np.iscomplexobj(target):
-        finite = np.isfinite(energy) & np.isfinite(np.real(target)) & np.isfinite(np.imag(target))
-    if energy_min is not None:
-        finite &= energy >= float(energy_min)
-    if energy_max is not None:
-        finite &= energy <= float(energy_max)
-
-    fit_energy = energy[finite]
-    fit_values = target[finite]
-    if fit_energy.size < len(_SPLIT_TRANSITION_PARAMETER_NAMES) + 2:
-        raise ValueError(
-            "Not enough finite points in the requested fit window for the "
-            "eight-parameter split-transition fit."
-        )
-
-    order = np.argsort(fit_energy)
-    fit_energy = fit_energy[order]
-    fit_values = fit_values[order]
-
-    guess = _split_transition_initial_guess(fit_energy, fit_values, max_delta_eV)
-    if initial is not None:
-        unknown = set(initial) - set(_SPLIT_TRANSITION_PARAMETER_NAMES)
-        if unknown:
-            raise ValueError(f"Unknown initial parameter(s): {sorted(unknown)}")
-        guess.update({key: float(value) for key, value in initial.items()})
-
-    lower, upper = _split_transition_bounds(fit_energy, fit_values, max_delta_eV)
-    p0 = np.array([guess[name] for name in _SPLIT_TRANSITION_PARAMETER_NAMES], dtype=np.float64)
-    p0 = np.clip(p0, lower + 1.0e-12, upper - 1.0e-12)
-
-    if robust_scale is None:
-        residual_seed = _stack_residuals(fit_values)
-        robust_scale = _mad_scale(residual_seed - np.nanmedian(residual_seed))
-    robust_scale = max(float(robust_scale), 1.0e-12)
-
-    def residuals(params: np.ndarray) -> np.ndarray:
-        model = split_transition_model(
-            fit_energy,
-            *params,
-            exponent=exponent,
-            component=component,
-        )
-        return _stack_residuals(model - fit_values)
-
-    opt = least_squares(
-        residuals,
-        p0,
-        bounds=(lower, upper),
-        loss=loss,
-        f_scale=robust_scale,
-        max_nfev=5000,
-    )
-
-    parameters = {
-        name: float(value)
-        for name, value in zip(_SPLIT_TRANSITION_PARAMETER_NAMES, opt.x)
-    }
-    parameters["delta_meV"] = 1000.0 * parameters["delta_eV"]
-    parameters["lower_transition_eV"] = (
-        parameters["center_eV"] - 0.5 * parameters["delta_eV"]
-    )
-    parameters["upper_transition_eV"] = (
-        parameters["center_eV"] + 0.5 * parameters["delta_eV"]
-    )
-
-    fitted_values = split_transition_model(
-        fit_energy,
-        **{name: parameters[name] for name in _SPLIT_TRANSITION_PARAMETER_NAMES},
-        exponent=exponent,
-        component=component,
-    )
-    residual = fitted_values - fit_values
-    residual_vector = _stack_residuals(residual)
-    rmse = float(np.sqrt(np.mean(residual_vector**2)))
-    mae = float(np.mean(np.abs(residual_vector)))
-
-    covariance = None
-    if opt.jac.shape[0] > opt.jac.shape[1]:
-        try:
-            _, singular_values, vt = np.linalg.svd(opt.jac, full_matrices=False)
-            threshold = np.finfo(float).eps * max(opt.jac.shape) * singular_values[0]
-            keep = singular_values > threshold
-            if np.any(keep):
-                cov = (vt[keep].T / singular_values[keep] ** 2) @ vt[keep]
-                cov *= 2.0 * opt.cost / max(1, opt.jac.shape[0] - opt.jac.shape[1])
-                covariance = cov
-        except Exception:
-            covariance = None
-
-    return {
-        "success": bool(opt.success),
-        "message": opt.message,
-        "parameters": parameters,
-        "parameter_names": _SPLIT_TRANSITION_PARAMETER_NAMES,
-        "initial_parameters": guess,
-        "energy_eV": fit_energy,
-        "values": fit_values,
-        "fitted_values": fitted_values,
-        "residuals": residual,
-        "rmse": rmse,
-        "mae": mae,
-        "n_points": int(fit_energy.size),
-        "component": component,
-        "exponent": float(exponent),
-        "loss": loss,
-        "robust_scale": robust_scale,
-        "optimizer": opt,
-        "covariance": covariance,
-    }
-
-
-def detect_spectral_features(
-    energy_eV: np.ndarray,
-    values: np.ndarray,
-    *,
-    scatter: np.ndarray | None = None,
-    energy_min: float | None = None,
-    energy_max: float | None = None,
-    component: str = "real",
-    baseline_widths_eV: tuple[float, ...] = _DEFAULT_FEATURE_BASELINE_WIDTHS_EV,
-    smooth_width_eV: float = 0.025,
-    min_z: float = 3.0,
-    min_prominence_z: float = 2.0,
-    min_separation_eV: float = 0.04,
-    max_features: int = 12,
-) -> dict[str, Any]:
-    """Detect candidate spectral features in a one-dimensional spectrum.
-
-    The detector subtracts rolling-median baselines at several energy scales,
-    smooths the residual, and reports local peaks/dips whose amplitude and
-    prominence are large compared with the local median-absolute-deviation
-    scale. Optional ``scatter`` values are used only for ranking and reporting,
-    so features are not discarded solely because rotation scatter is large.
-    """
-    if component == "complex":
-        raise ValueError("Feature detection needs a scalar component: real, imag, or abs.")
-
-    energy = np.asarray(energy_eV, dtype=np.float64)
-    raw_values = np.asarray(values)
-    if energy.ndim != 1:
-        raise ValueError(f"energy_eV must be one-dimensional; got {energy.shape}.")
-    if raw_values.shape != energy.shape:
-        raise ValueError(f"values must have shape {energy.shape}; got {raw_values.shape}.")
-
-    y = np.asarray(_spectrum_component(raw_values, component), dtype=np.float64)
-    scatter_abs = None
-    if scatter is not None:
-        scatter_arr = np.asarray(scatter)
-        if scatter_arr.shape != energy.shape:
-            raise ValueError(f"scatter must have shape {energy.shape}; got {scatter_arr.shape}.")
-        scatter_abs = np.abs(scatter_arr).astype(np.float64, copy=False)
-
-    finite = np.isfinite(energy) & np.isfinite(y)
-    if energy_min is not None:
-        finite &= energy >= float(energy_min)
-    if energy_max is not None:
-        finite &= energy <= float(energy_max)
-
-    scan_energy = energy[finite]
-    scan_values = y[finite]
-    scan_scatter = None if scatter_abs is None else scatter_abs[finite]
-    if scan_energy.size < 7:
-        return {
-            "settings": {
-                "component": component,
-                "energy_window_eV": (energy_min, energy_max),
-                "baseline_widths_eV": tuple(float(width) for width in baseline_widths_eV),
-                "smooth_width_eV": float(smooth_width_eV),
-                "min_z": float(min_z),
-                "min_prominence_z": float(min_prominence_z),
-                "min_separation_eV": float(min_separation_eV),
-                "max_features": int(max_features),
-            },
-            "n_points": int(scan_energy.size),
-            "features": [],
-            "message": "Not enough finite points for feature detection.",
-        }
-
-    order = np.argsort(scan_energy)
-    scan_energy = scan_energy[order]
-    scan_values = scan_values[order]
-    if scan_scatter is not None:
-        scan_scatter = scan_scatter[order]
-
-    distance_points = max(
-        1,
-        _odd_window_points(scan_energy, min_separation_eV, minimum=1),
-    )
-    all_features: list[dict[str, float | str | None]] = []
-
-    for baseline_width in baseline_widths_eV:
-        baseline_points = _odd_window_points(scan_energy, baseline_width, minimum=5)
-        if baseline_points >= scan_values.size:
-            continue
-
-        baseline = _running_nanmedian(scan_values, baseline_points)
-        residual = scan_values - baseline
-        smooth_points = _odd_window_points(scan_energy, smooth_width_eV, minimum=5)
-        if smooth_points < scan_values.size:
-            smoothed = savgol_filter(residual, smooth_points, 2, mode="interp")
-        else:
-            smoothed = residual
-
-        local_noise = _running_mad_scale(residual, baseline_points)
-        finite_residual = residual[np.isfinite(residual)]
-        if finite_residual.size:
-            residual_median = float(np.nanmedian(finite_residual))
-            global_noise = 1.4826 * float(
-                np.nanmedian(np.abs(finite_residual - residual_median))
-            )
-            if not np.isfinite(global_noise) or global_noise <= 0.0:
-                global_noise = float(np.nanstd(finite_residual))
-        else:
-            global_noise = np.nan
-        if not np.isfinite(global_noise) or global_noise <= 0.0:
-            global_noise = np.finfo(float).eps
-
-        valid_noise = local_noise[np.isfinite(local_noise) & (local_noise > 0.0)]
-        if valid_noise.size:
-            noise_floor = 0.10 * float(np.nanmedian(valid_noise))
-        else:
-            noise_floor = 0.10 * global_noise
-        noise_floor = max(noise_floor, 0.10 * global_noise, np.finfo(float).eps)
-        local_noise = np.where(
-            np.isfinite(local_noise) & (local_noise > 0.0),
-            local_noise,
-            noise_floor,
-        )
-        local_noise = np.maximum(local_noise, noise_floor)
-
-        abs_smoothed = np.abs(smoothed)
-        peaks, _ = find_peaks(abs_smoothed, distance=distance_points)
-        if peaks.size == 0:
-            continue
-        prominences = peak_prominences(abs_smoothed, peaks)[0]
-
-        for peak_index, prominence in zip(peaks, prominences):
-            amplitude = float(abs_smoothed[peak_index])
-            noise = float(local_noise[peak_index])
-            z_score = amplitude / noise
-            prominence_z = float(prominence) / noise
-            if z_score < float(min_z) or prominence_z < float(min_prominence_z):
-                continue
-
-            scatter_value = None
-            scatter_ratio = None
-            if scan_scatter is not None:
-                candidate_scatter = float(scan_scatter[peak_index])
-                if np.isfinite(candidate_scatter):
-                    scatter_value = candidate_scatter
-                    if candidate_scatter > 0.0:
-                        scatter_ratio = amplitude / candidate_scatter
-
-            score = z_score * np.sqrt(max(prominence_z, 1.0))
-            if scatter_ratio is not None:
-                score *= np.sqrt(max(scatter_ratio, 0.05))
-
-            all_features.append(
-                {
-                    "energy_eV": float(scan_energy[peak_index]),
-                    "kind": "peak" if float(smoothed[peak_index]) >= 0.0 else "dip",
-                    "component": component,
-                    "component_value": float(scan_values[peak_index]),
-                    "baseline_value": float(baseline[peak_index]),
-                    "detrended_value": float(smoothed[peak_index]),
-                    "amplitude_abs": amplitude,
-                    "prominence_abs": float(prominence),
-                    "local_noise": noise,
-                    "z_score": float(z_score),
-                    "prominence_z": float(prominence_z),
-                    "rotation_scatter_abs": scatter_value,
-                    "scatter_ratio": None if scatter_ratio is None else float(scatter_ratio),
-                    "baseline_width_eV": float(baseline_width),
-                    "score": float(score),
-                }
-            )
-
-    all_features.sort(key=lambda feature: float(feature["score"]), reverse=True)
-    merged_features: list[dict[str, float | str | None | int]] = []
-    for feature in all_features:
-        if all(
-            abs(float(feature["energy_eV"]) - float(existing["energy_eV"]))
-            >= float(min_separation_eV)
-            for existing in merged_features
-        ):
-            feature = dict(feature)
-            feature["rank"] = len(merged_features) + 1
-            merged_features.append(feature)
-        if len(merged_features) >= int(max_features):
-            break
-
-    return {
-        "settings": {
-            "component": component,
-            "energy_window_eV": (energy_min, energy_max),
-            "baseline_widths_eV": tuple(float(width) for width in baseline_widths_eV),
-            "smooth_width_eV": float(smooth_width_eV),
-            "min_z": float(min_z),
-            "min_prominence_z": float(min_prominence_z),
-            "min_separation_eV": float(min_separation_eV),
-            "max_features": int(max_features),
-        },
-        "n_points": int(scan_energy.size),
-        "features": merged_features,
-        "message": "ok",
-    }
-
-
-def collapse_twofold_anisotropy_spectrum(
-    component_x: np.ndarray,
-    component_y: np.ndarray,
-    rotations_deg: np.ndarray,
-    value_part: str = "real",
     axis_offset_deg: float = 0.0,
-) -> dict[str, np.ndarray]:
-    """Rotate a twofold anisotropy vector into the sample frame and average it.
-
-    ``component_x`` and ``component_y`` should have shape
-    ``(n_rotations, n_energy)``. The returned ``spectrum`` is complex: its real
-    part is the anisotropy along the chosen sample axis, while its imaginary
-    part is the residual quadrature/cross-axis component after rotation
-    collapse.
-    """
-    x = _spectrum_component(np.asarray(component_x), value_part)
-    y = _spectrum_component(np.asarray(component_y), value_part)
-    rotations = np.asarray(rotations_deg, dtype=np.float64)
-
-    if x.shape != y.shape:
-        raise ValueError(f"component_x and component_y shapes differ: {x.shape}, {y.shape}.")
-    if x.ndim != 2:
-        raise ValueError(f"components must have shape (n_rotations, n_energy); got {x.shape}.")
-    if x.shape[0] != rotations.size:
-        raise ValueError(
-            f"rotations_deg length {rotations.size} does not match component axis {x.shape[0]}."
+    max_delta_eV: float | None = 0.20,
+    smooth_width_eV: float = 0.025,
+) -> dict[str, Any]:
+    """Direct derivative split estimate from a collapsed LD/LB spectrum."""
+    terms = result["terms"]
+    x_name = f"{term_prefix}_x"
+    y_name = f"{term_prefix}_y"
+    if x_name not in terms or y_name not in terms:
+        raise KeyError(
+            f"Could not find {x_name!r} and {y_name!r}. Available terms: {sorted(terms)}"
         )
 
-    theta = np.deg2rad(rotations + float(axis_offset_deg))
-    rotated = (x + 1j * y) * np.exp(-2j * theta)[:, np.newaxis]
-    return {
-        "rotated_spectra": rotated,
-        "spectrum": np.nanmean(rotated, axis=0),
-        "scatter": np.nanstd(rotated, axis=0),
-        "value_part": value_part,
-        "axis_offset_deg": float(axis_offset_deg),
-    }
+    collapsed = collapse_twofold_anisotropy_spectrum(
+        terms[x_name],
+        terms[y_name],
+        result["rotations_deg"],
+        value_part=vector_part,
+        axis_offset_deg=axis_offset_deg,
+    )
+    estimate = estimate_direct_derivative_split_spectrum(
+        result["energy_eV"],
+        collapsed["spectrum"],
+        energy_min=energy_min,
+        energy_max=energy_max,
+        component=component,
+        max_delta_eV=max_delta_eV,
+        smooth_width_eV=smooth_width_eV,
+    )
+    estimate["term_prefix"] = term_prefix
+    estimate["vector_part"] = vector_part
+    estimate["axis_offset_deg"] = float(axis_offset_deg)
+    return estimate
 
 
 def detect_decomposition_features(
@@ -1880,36 +760,6 @@ def fit_split_transition_to_decomposition(
     return fit
 
 
-def _windowed_signal_scale(
-    energy: np.ndarray,
-    values: np.ndarray,
-    energy_min: float,
-    energy_max: float,
-) -> float:
-    component_values = np.asarray(values)
-    finite = np.isfinite(energy)
-    finite &= energy >= float(energy_min)
-    finite &= energy <= float(energy_max)
-    if np.iscomplexobj(component_values):
-        finite &= np.isfinite(np.real(component_values)) & np.isfinite(
-            np.imag(component_values)
-        )
-    else:
-        finite &= np.isfinite(component_values)
-
-    window_values = _stack_residuals(component_values[finite])
-    window_values = window_values[np.isfinite(window_values)]
-    if window_values.size == 0:
-        return 1.0
-    centered = window_values - float(np.nanmedian(window_values))
-    scale = float(np.nanpercentile(np.abs(centered), 95))
-    if not np.isfinite(scale) or scale <= 0.0:
-        scale = float(np.nanmax(np.abs(window_values)))
-    if not np.isfinite(scale) or scale <= 0.0:
-        scale = 1.0
-    return scale
-
-
 def _fit_normalized_split_transition_to_decomposition(
     result: dict[str, Any],
     *,
@@ -1956,45 +806,6 @@ def _fit_normalized_split_transition_to_decomposition(
     fit["axis_offset_deg"] = float(axis_offset_deg)
     fit["normalization_scale"] = scale
     return fit
-
-
-def _local_split_initial_guesses(
-    feature_energies: list[float],
-    energy_min: float,
-    energy_max: float,
-    max_delta_eV: float | None,
-) -> list[dict[str, float] | None]:
-    center = 0.5 * (min(feature_energies) + max(feature_energies))
-    span = max(float(energy_max) - float(energy_min), 1.0e-6)
-    feature_span = max(feature_energies) - min(feature_energies)
-    delta_limit = float(max_delta_eV) if max_delta_eV is not None else 0.5 * span
-    delta_guesses = [
-        feature_span if feature_span > 0.0 else 0.040,
-        0.75 * feature_span if feature_span > 0.0 else 0.020,
-        1.25 * feature_span if feature_span > 0.0 else 0.060,
-        min(0.040, delta_limit),
-    ]
-    broadening_guesses = (0.010, 0.020, 0.040)
-
-    guesses: list[dict[str, float] | None] = [None]
-    seen: set[tuple[float, float, float]] = set()
-    for delta_guess in delta_guesses:
-        delta = max(0.0, min(float(delta_guess), delta_limit))
-        if delta <= 0.0:
-            continue
-        for broadening in broadening_guesses:
-            key = (round(center, 8), round(delta, 8), round(broadening, 8))
-            if key in seen:
-                continue
-            seen.add(key)
-            guesses.append(
-                {
-                    "center_eV": center,
-                    "delta_eV": delta,
-                    "broadening_eV": broadening,
-                }
-            )
-    return guesses
 
 
 def _best_local_split_fit(
@@ -2055,7 +866,9 @@ def _best_local_split_fit(
     ]
     best["n_initial_guesses"] = len(fits)
     best["candidate_delta_meV"] = [
-        fit["parameters"]["delta_meV"] for fit in fits if np.isfinite(fit["parameters"]["delta_meV"])
+        fit["parameters"]["delta_meV"]
+        for fit in fits
+        if np.isfinite(fit["parameters"]["delta_meV"])
     ]
     best["near_best_delta_meV"] = near_best_delta
     if len(near_best_delta) > 1:
@@ -2063,42 +876,6 @@ def _best_local_split_fit(
     else:
         best["delta_std_meV"] = 0.0
     return best
-
-
-def kk_split_model(
-    energy_eV: np.ndarray,
-    center_eV: float,
-    delta_eV: float,
-    broadening_eV: float,
-    amplitude_low: float,
-    amplitude_high: float,
-    phase_rad: float = 0.0,
-    exponent: float = -0.5,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return (linear_dichroism, linear_birefringence) from one shared model.
-
-    A single complex anisotropic susceptibility is built from two critical
-    points at ``center_eV -/+ delta_eV / 2``. Linear dichroism is its
-    absorptive (imaginary) part and linear birefringence its dispersive (real)
-    part. Because both channels are generated from the *same* transition
-    energies, broadening, and amplitudes, the model is Kramers-Kronig
-    consistent by construction: LD and LB cannot prefer different transition
-    energies. ``phase_rad`` is a single shared phase that fixes which quadrature
-    is absorptive without breaking the 90-degree LD/LB relationship.
-    """
-    energy = np.asarray(energy_eV, dtype=np.float64)
-    center = float(center_eV)
-    delta = abs(float(delta_eV))
-    low_profile = _critical_point_complex_profile(
-        energy, center - 0.5 * delta, broadening_eV, exponent
-    )
-    high_profile = _critical_point_complex_profile(
-        energy, center + 0.5 * delta, broadening_eV, exponent
-    )
-    susceptibility = np.exp(1j * float(phase_rad)) * (
-        float(amplitude_low) * low_profile + float(amplitude_high) * high_profile
-    )
-    return np.imag(susceptibility), np.real(susceptibility)
 
 
 def fit_kk_consistent_split_to_decomposition(
@@ -2113,14 +890,7 @@ def fit_kk_consistent_split_to_decomposition(
     initial: dict[str, float] | None = None,
     loss: str = "soft_l1",
 ) -> dict[str, Any]:
-    """Jointly fit the LD and LB on-axis spectra with one KK-consistent model.
-
-    Unlike fitting LD and LB independently and then averaging their separate
-    transition energies, this shares ``center_eV``, ``delta_eV``, and
-    ``broadening_eV`` across both channels, so the returned ``delta_eV`` is the
-    splitting that simultaneously explains dichroism and birefringence. Each
-    channel keeps its own amplitude, linear baseline, and robust scale.
-    """
+    """Jointly fit the LD and LB on-axis spectra with one KK-consistent model."""
     terms = result["terms"]
     rotations = result["rotations_deg"]
     energy = np.asarray(result["energy_eV"], dtype=np.float64)
@@ -2139,127 +909,20 @@ def fit_kk_consistent_split_to_decomposition(
         value_part=vector_part,
         axis_offset_deg=axis_offset_deg,
     )
-    ld_values = np.real(ld["spectrum"])
-    lb_values = np.real(lb["spectrum"])
-
-    finite = (
-        np.isfinite(energy)
-        & np.isfinite(ld_values)
-        & np.isfinite(lb_values)
-        & (energy >= float(energy_min))
-        & (energy <= float(energy_max))
+    fit = fit_kk_consistent_split_spectra(
+        energy,
+        np.real(ld["spectrum"]),
+        np.real(lb["spectrum"]),
+        energy_min=energy_min,
+        energy_max=energy_max,
+        exponent=exponent,
+        max_delta_eV=max_delta_eV,
+        initial=initial,
+        loss=loss,
     )
-    fit_energy = energy[finite]
-    ld_target = ld_values[finite]
-    lb_target = lb_values[finite]
-    if fit_energy.size < 10:
-        raise ValueError("Not enough finite points for a joint KK split fit.")
-
-    order = np.argsort(fit_energy)
-    fit_energy = fit_energy[order]
-    ld_target = ld_target[order]
-    lb_target = lb_target[order]
-
-    ld_scale = max(_mad_scale(ld_target - np.nanmedian(ld_target)), 1.0e-12)
-    lb_scale = max(_mad_scale(lb_target - np.nanmedian(lb_target)), 1.0e-12)
-    energy_ref = float(np.nanmean(fit_energy))
-
-    e_min = float(np.nanmin(fit_energy))
-    e_max = float(np.nanmax(fit_energy))
-    span = max(e_max - e_min, 1.0e-6)
-    step = float(np.nanmedian(np.diff(fit_energy)))
-    delta_upper = 0.25 * span if max_delta_eV is None else float(max_delta_eV)
-    delta_upper = max(delta_upper, max(0.010, 2.0 * abs(step)))
-    broadening_lower = max(1.0e-5, 0.25 * abs(step))
-    broadening_upper = max(0.5 * span, 10.0 * broadening_lower)
-    amplitude_bound = 20.0 * max(ld_scale, lb_scale)
-
-    # parameter order: center, delta, broadening, amp_low, amp_high, phase,
-    #                   off_ld, slope_ld, off_lb, slope_lb
-    lower = np.array(
-        [e_min, 0.0, broadening_lower, -amplitude_bound, -amplitude_bound, -np.pi,
-         -20.0 * ld_scale, -20.0 * ld_scale / span,
-         -20.0 * lb_scale, -20.0 * lb_scale / span],
-        dtype=np.float64,
-    )
-    upper = np.array(
-        [e_max, delta_upper, broadening_upper, amplitude_bound, amplitude_bound, np.pi,
-         20.0 * ld_scale, 20.0 * ld_scale / span,
-         20.0 * lb_scale, 20.0 * lb_scale / span],
-        dtype=np.float64,
-    )
-
-    peak_index = int(np.nanargmax(np.abs(ld_target - np.nanmedian(ld_target))))
-    guess = {
-        "center_eV": float(fit_energy[peak_index]),
-        "delta_eV": min(0.040, 0.5 * delta_upper),
-        "broadening_eV": max(0.010, 3.0 * abs(step)),
-        "amplitude_low": ld_scale,
-        "amplitude_high": -ld_scale,
-        "phase_rad": 0.0,
-        "offset_ld": float(np.nanmedian(ld_target)),
-        "slope_ld": 0.0,
-        "offset_lb": float(np.nanmedian(lb_target)),
-        "slope_lb": 0.0,
-    }
-    if initial:
-        guess.update({k: float(v) for k, v in initial.items() if k in guess})
-    p0 = np.clip(
-        np.array(list(guess.values()), dtype=np.float64),
-        lower + 1.0e-12,
-        upper - 1.0e-12,
-    )
-
-    def residuals(params: np.ndarray) -> np.ndarray:
-        (center, delta, broadening, amp_low, amp_high, phase,
-         off_ld, slope_ld, off_lb, slope_lb) = params
-        ld_model, lb_model = kk_split_model(
-            fit_energy, center, delta, broadening, amp_low, amp_high, phase,
-            exponent=exponent,
-        )
-        ld_model = ld_model + off_ld + slope_ld * (fit_energy - energy_ref)
-        lb_model = lb_model + off_lb + slope_lb * (fit_energy - energy_ref)
-        return np.concatenate(
-            [(ld_model - ld_target) / ld_scale, (lb_model - lb_target) / lb_scale]
-        )
-
-    opt = least_squares(
-        residuals, p0, bounds=(lower, upper), loss=loss, f_scale=1.0, max_nfev=5000
-    )
-    names = (
-        "center_eV", "delta_eV", "broadening_eV", "amplitude_low", "amplitude_high",
-        "phase_rad", "offset_ld", "slope_ld", "offset_lb", "slope_lb",
-    )
-    parameters = {name: float(value) for name, value in zip(names, opt.x)}
-    parameters["delta_eV"] = abs(parameters["delta_eV"])
-    parameters["delta_meV"] = 1000.0 * parameters["delta_eV"]
-    parameters["lower_transition_eV"] = parameters["center_eV"] - 0.5 * parameters["delta_eV"]
-    parameters["upper_transition_eV"] = parameters["center_eV"] + 0.5 * parameters["delta_eV"]
-
-    final = residuals(opt.x)
-    n_per_channel = fit_energy.size
-    ld_residual = final[:n_per_channel]
-    lb_residual = final[n_per_channel:]
-    rmse = float(np.sqrt(np.mean(final**2)))
-    ld_rmse = float(np.sqrt(np.mean(ld_residual**2)))
-    lb_rmse = float(np.sqrt(np.mean(lb_residual**2)))
-
-    return {
-        "success": bool(opt.success),
-        "message": opt.message,
-        "parameters": parameters,
-        "energy_eV": fit_energy,
-        "ld_values": ld_target,
-        "lb_values": lb_target,
-        "energy_window_eV": (float(energy_min), float(energy_max)),
-        "rmse": rmse,
-        "ld_rmse": ld_rmse,
-        "lb_rmse": lb_rmse,
-        "n_points": int(fit_energy.size),
-        "exponent": float(exponent),
-        "vector_part": vector_part,
-        "axis_offset_deg": float(axis_offset_deg),
-    }
+    fit["vector_part"] = vector_part
+    fit["axis_offset_deg"] = float(axis_offset_deg)
+    return fit
 
 
 def _estimate_energy_windows_overlap(
@@ -2373,6 +1036,43 @@ def summarize_splitting_consensus(
                 if len(finite_centers) > 1
                 else 0.0
             )
+            derivative_splits = [
+                _finite_or_nan(ld_estimate.get("direct_derivative_splitting_meV")),
+                _finite_or_nan(lb_estimate.get("direct_derivative_splitting_meV")),
+            ]
+            finite_derivative_splits = [
+                value for value in derivative_splits if np.isfinite(value)
+            ]
+            derivative_spread_meV = (
+                float(max(finite_derivative_splits) - min(finite_derivative_splits))
+                if len(finite_derivative_splits) > 1
+                else np.nan
+            )
+            derivative_splitting_meV = (
+                float(np.mean(finite_derivative_splits))
+                if finite_derivative_splits
+                else np.nan
+            )
+            derivative_component_agreement = bool(
+                len(finite_derivative_splits) >= 2
+                and derivative_spread_meV <= float(agreement_tolerance_meV)
+            )
+            derivative_confidences = [
+                str(ld_estimate.get("direct_derivative_confidence", "")),
+                str(lb_estimate.get("direct_derivative_confidence", "")),
+            ]
+            derivative_confidence_order = {"high": 0, "medium": 1, "provisional": 2}
+            finite_derivative_confidences = [
+                value for value in derivative_confidences if value in derivative_confidence_order
+            ]
+            derivative_confidence = (
+                max(
+                    finite_derivative_confidences,
+                    key=lambda value: derivative_confidence_order[value],
+                )
+                if finite_derivative_confidences
+                else ""
+            )
             transitions_within_tolerance = bool(
                 lower_transition_spread_meV <= float(transition_tolerance_meV)
                 and upper_transition_spread_meV <= float(transition_tolerance_meV)
@@ -2437,6 +1137,12 @@ def summarize_splitting_consensus(
                     "component_lower_transition_eV": lower_transitions,
                     "component_upper_transition_eV": upper_transitions,
                     "component_center_eV": centers,
+                    "component_direct_derivative_splittings_meV": derivative_splits,
+                    "component_direct_derivative_confidence": derivative_confidences,
+                    "direct_derivative_splitting_meV": derivative_splitting_meV,
+                    "direct_derivative_spread_meV": derivative_spread_meV,
+                    "direct_derivative_component_agreement": derivative_component_agreement,
+                    "direct_derivative_confidence": derivative_confidence,
                     "component_assignment_quality": [
                         str(ld_estimate.get("assignment_quality", "")),
                         str(lb_estimate.get("assignment_quality", "")),
@@ -2499,8 +1205,9 @@ def summarize_splitting_consensus(
             "linear-birefringence pair from overlapping energy windows, then "
             "the closest splitting agreement. If the overlapping pair has an "
             "LD/LB splitting spread above the tolerance, Eg is still assigned "
-            "from the shared energy region, but the splitting is provisional. "
-            "If no overlapping pair is found, it falls back to the closest "
+            "from the shared energy region, and a stable single-channel "
+            "transition separation can be used as a provisional Delta Vb. If "
+            "no overlapping pair is found, it falls back to the closest "
             "numerical agreement without assigning Eg."
         ),
     }
@@ -2512,6 +1219,73 @@ def _finite_or_nan(value: Any) -> float:
     except (TypeError, ValueError):
         return np.nan
     return number if np.isfinite(number) else np.nan
+
+
+def _component_delta_vb_candidates(primary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return stable single-channel transition-separation candidates."""
+    terms = [str(value) for value in primary.get("component_terms", [])]
+    values = [
+        _finite_or_nan(value)
+        for value in primary.get("component_splittings_meV", [])
+    ]
+    lowers = [
+        _finite_or_nan(value)
+        for value in primary.get("component_lower_transition_eV", [])
+    ]
+    uppers = [
+        _finite_or_nan(value)
+        for value in primary.get("component_upper_transition_eV", [])
+    ]
+    qualities = [
+        str(value) for value in primary.get("component_assignment_quality", [])
+    ]
+    stabilities = [
+        str(value) for value in primary.get("component_fit_stability", [])
+    ]
+    ranks: list[int] = []
+    for value in primary.get("component_estimate_ranks", []):
+        try:
+            ranks.append(int(value))
+        except (TypeError, ValueError):
+            ranks.append(999)
+
+    candidates: list[dict[str, Any]] = []
+    for index, term in enumerate(terms):
+        value = values[index] if index < len(values) else np.nan
+        lower = lowers[index] if index < len(lowers) else np.nan
+        upper = uppers[index] if index < len(uppers) else np.nan
+        stability = stabilities[index] if index < len(stabilities) else ""
+        if (
+            not np.isfinite(value)
+            or not np.isfinite(lower)
+            or not np.isfinite(upper)
+            or upper <= lower
+            or stability != "stable"
+        ):
+            continue
+        transition_delta_meV = 1000.0 * (upper - lower)
+        if abs(transition_delta_meV - value) > max(0.5, 0.02 * abs(value)):
+            continue
+        candidates.append(
+            {
+                "term": term,
+                "value": float(value),
+                "lower_transition_eV": float(lower),
+                "upper_transition_eV": float(upper),
+                "assignment_quality": qualities[index] if index < len(qualities) else "",
+                "fit_stability": stability,
+                "rank": ranks[index] if index < len(ranks) else 999,
+            }
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            item["assignment_quality"] != "paired_features",
+            item["term"] != "linear_dichroism",
+            int(item["rank"]),
+        )
+    )
+    return candidates
 
 
 def _add_delta_vb_recommendation(primary: dict[str, Any]) -> None:
@@ -2582,17 +1356,109 @@ def _add_delta_vb_recommendation(primary: dict[str, Any]) -> None:
                 "LD/LB component splits."
             )
 
-    if warnings_out:
+    direct_value = _finite_or_nan(primary.get("direct_derivative_splitting_meV"))
+    direct_spread = _finite_or_nan(primary.get("direct_derivative_spread_meV"))
+    direct_confidence = str(primary.get("direct_derivative_confidence", ""))
+    direct_usable = bool(
+        np.isfinite(direct_value)
+        and bool(primary.get("direct_derivative_component_agreement"))
+        and direct_confidence in {"high", "medium"}
+    )
+    if np.isfinite(direct_value) and not direct_usable:
+        primary["direct_derivative_rejected_reason"] = (
+            "LD/LB derivative peak separation did not reach medium confidence "
+            "or component agreement."
+        )
+
+    recommendation_values: list[float] = []
+    recommendation_sources: list[str] = []
+    recommendation_notes: list[str] = []
+    agreement_limit = max(tolerance, transition_tolerance)
+
+    if not warnings_out:
+        split_value = _finite_or_nan(primary.get("splitting_meV"))
+        if np.isfinite(split_value):
+            recommendation_values.append(split_value)
+            recommendation_sources.append("independent_ld_lb_mean")
+        if np.isfinite(kk_value) and np.isfinite(split_value):
+            if abs(kk_value - split_value) <= agreement_limit:
+                recommendation_values.append(float(kk_value))
+                recommendation_sources.append("joint_kk")
+            else:
+                warnings_out.append("Joint KK split is outside the recommendation tolerance.")
+        if direct_usable and np.isfinite(split_value):
+            if abs(direct_value - split_value) <= agreement_limit:
+                recommendation_values.append(float(direct_value))
+                recommendation_sources.append("direct_derivative")
+            else:
+                recommendation_notes.append(
+                    "Direct derivative split was not fused because it is outside "
+                    "the recommendation tolerance."
+                )
+    else:
+        if direct_usable:
+            direct_values = [float(direct_value)]
+            if np.isfinite(kk_value):
+                if abs(float(kk_value) - float(direct_value)) <= agreement_limit:
+                    direct_values.append(float(kk_value))
+                    recommendation_sources.append("joint_kk")
+                else:
+                    recommendation_notes.append(
+                        "Joint KK split was not fused with the direct derivative split."
+                    )
+            recommendation_values = direct_values
+            recommendation_sources.insert(0, "direct_derivative_ld_lb_consensus")
+            recommendation_notes.append(
+                "Independent split-transition checks were inconclusive; using "
+                "the direct dD/dE LD/LB peak separation instead."
+            )
+        else:
+            component_candidates = _component_delta_vb_candidates(primary)
+            if component_candidates:
+                best_component = component_candidates[0]
+                recommendation_values = [float(best_component["value"])]
+                recommendation_sources = [
+                    f"{best_component['term']}_transition_separation"
+                ]
+                primary["single_component_delta_vb_meV"] = float(
+                    best_component["value"]
+                )
+                primary["single_component_delta_source"] = str(best_component["term"])
+                primary["single_component_lower_transition_eV"] = float(
+                    best_component["lower_transition_eV"]
+                )
+                primary["single_component_upper_transition_eV"] = float(
+                    best_component["upper_transition_eV"]
+                )
+                recommendation_notes.append(
+                    "LD/LB consensus checks were inconclusive; using the stable "
+                    f"{best_component['term'].replace('_', ' ')} transition "
+                    "separation as a provisional Delta Vb."
+                )
+
+    finite_recommendations = [
+        value for value in recommendation_values if np.isfinite(value)
+    ]
+    if finite_recommendations:
+        primary["recommended_delta_vb_meV"] = float(np.mean(finite_recommendations))
+        primary["recommended_delta_source"] = "+".join(recommendation_sources)
+        primary["recommendation_components_meV"] = finite_recommendations
+        primary["recommendation_spread_meV"] = (
+            float(max(finite_recommendations) - min(finite_recommendations))
+            if len(finite_recommendations) > 1
+            else 0.0
+        )
+        primary["requires_manual_delta_vb"] = False
+    else:
         primary["recommended_delta_vb_meV"] = np.nan
         primary["recommended_delta_source"] = "manual_review_required"
-    else:
-        primary["recommended_delta_vb_meV"] = float(primary["splitting_meV"])
-        if np.isfinite(kk_value):
-            primary["recommended_delta_source"] = "stable_ld_lb_mean_kk_validated"
-        else:
-            primary["recommended_delta_source"] = "stable_ld_lb_independent_mean"
+        primary["recommendation_components_meV"] = []
+        primary["recommendation_spread_meV"] = np.nan
+        primary["requires_manual_delta_vb"] = True
+    primary["direct_derivative_usable"] = direct_usable
+    primary["direct_derivative_agreement_limit_meV"] = float(agreement_limit)
+    primary["recommendation_notes"] = recommendation_notes
     primary["math_warnings"] = warnings_out
-    primary["requires_manual_delta_vb"] = bool(warnings_out)
 
 
 def estimate_valence_band_splittings(
@@ -2736,6 +1602,38 @@ def estimate_valence_band_splittings(
             ),
         }
         try:
+            direct = estimate_direct_derivative_split_to_decomposition(
+                result,
+                term_prefix=term_prefix,
+                energy_min=lower,
+                energy_max=upper,
+                vector_part=vector_part,
+                component=fit_component,
+                axis_offset_deg=axis_offset_deg,
+                max_delta_eV=max_delta_eV,
+            )
+        except Exception as exc:
+            direct = {"success": False, "message": str(exc)}
+        estimate.update(
+            {
+                "direct_derivative_success": bool(direct.get("success")),
+                "direct_derivative_message": str(direct.get("message", "")),
+                "direct_derivative_splitting_meV": direct.get("splitting_meV", np.nan),
+                "direct_derivative_splitting_eV": direct.get("splitting_eV", np.nan),
+                "direct_derivative_lower_peak_eV": direct.get("lower_peak_eV", np.nan),
+                "direct_derivative_upper_peak_eV": direct.get("upper_peak_eV", np.nan),
+                "direct_derivative_center_eV": direct.get("center_eV", np.nan),
+                "direct_derivative_confidence": str(direct.get("confidence", "")),
+                "direct_derivative_score": direct.get("score", np.nan),
+                "direct_derivative_weakest_peak_z": direct.get("weakest_peak_z", np.nan),
+                "direct_derivative_weakest_peak_prominence_z": direct.get(
+                    "weakest_peak_prominence_z",
+                    np.nan,
+                ),
+                "direct_derivative_n_peaks": int(direct.get("n_candidate_peaks", 0)),
+            }
+        )
+        try:
             fit = _best_local_split_fit(
                 result,
                 term_prefix=term_prefix,
@@ -2860,8 +1758,10 @@ def estimate_valence_band_splittings(
         "note": (
             "splitting_meV is a valence-band splitting only if the two "
             "transitions share the same conduction-band final state. "
-            "recommended_delta_vb_meV is filled only when the LD/LB pair passes "
-            "the stability, assignment, agreement, and joint KK consistency checks. "
+            "recommended_delta_vb_meV uses the stable LD/LB split-transition "
+            "mean when available, otherwise a stable single-channel "
+            "transition separation or a medium/high-confidence direct dD/dE "
+            "LD/LB peak-separation estimate can provide the fallback. "
             "kk_consistent_split is the joint Kramers-Kronig LD/LB fit splitting."
         ),
     }
@@ -2944,6 +1844,20 @@ def build_short_report_rows(
         )
         add(
             "main_result",
+            "direct_derivative_splitting",
+            primary.get("direct_derivative_splitting_meV"),
+            "meV",
+            "LD/LB dD/dE peak-separation estimate",
+        )
+        add(
+            "main_result",
+            "direct_derivative_spread",
+            primary.get("direct_derivative_spread_meV"),
+            "meV",
+            "difference between LD and LB direct derivative splits",
+        )
+        add(
+            "main_result",
             "kk_component_max_difference",
             primary.get("kk_component_max_difference_meV"),
             "meV",
@@ -2996,6 +1910,7 @@ def build_short_report_rows(
             "meV",
         )
         add("main_result", "math_warnings", primary.get("math_warnings", []))
+        add("main_result", "recommendation_notes", primary.get("recommendation_notes", []))
         add(
             "main_result",
             "component_splittings",
@@ -3013,6 +1928,12 @@ def build_short_report_rows(
         for estimate in splitting_estimates.get("estimates", [])[:6]:
             prefix = f"estimate_{estimate.get('rank', '')}_{estimate.get('term_prefix', '')}"
             add(prefix, "splitting", estimate.get("splitting_meV"), "meV")
+            add(
+                prefix,
+                "direct_derivative_splitting",
+                estimate.get("direct_derivative_splitting_meV"),
+                "meV",
+            )
             add(prefix, "lower_transition", estimate.get("lower_transition_eV"), "eV")
             add(prefix, "upper_transition", estimate.get("upper_transition_eV"), "eV")
             add(prefix, "assignment_quality", estimate.get("assignment_quality", ""))
@@ -3501,6 +2422,32 @@ def _run_synthetic_demo() -> None:
         "split-transition synthetic fit: "
         f"delta={split_fit['parameters']['delta_meV']:.2f} meV, "
         f"delta_error={1000.0 * split_delta_error:.2f} meV"
+    )
+    direct_delta_eV = 0.065
+    direct_center_eV = 2.000
+    direct_low = direct_center_eV - 0.5 * direct_delta_eV
+    direct_high = direct_center_eV + 0.5 * direct_delta_eV
+    direct_values = (
+        0.020 * np.tanh((split_energy - direct_low) / 0.006)
+        - 0.018 * np.tanh((split_energy - direct_high) / 0.006)
+        + 0.003 * (split_energy - direct_center_eV)
+    )
+    direct_fit = estimate_direct_derivative_split_spectrum(
+        split_energy,
+        direct_values,
+        smooth_width_eV=0.012,
+        max_delta_eV=0.12,
+    )
+    direct_delta_error = abs(direct_fit["splitting_eV"] - direct_delta_eV)
+    if (not direct_fit["success"]) or direct_delta_error > 3.0e-3:
+        raise AssertionError(
+            "direct derivative split failed: "
+            f"delta_error={direct_delta_error:.3e}, fit={direct_fit}"
+        )
+    print(
+        "direct derivative synthetic split: "
+        f"delta={direct_fit['splitting_meV']:.2f} meV, "
+        f"delta_error={1000.0 * direct_delta_error:.2f} meV"
     )
     if dataset["diagnostics"]["warnings"]:
         print("diagnostic warnings:")
