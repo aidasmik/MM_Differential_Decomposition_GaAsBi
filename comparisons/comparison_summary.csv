@@ -1,9 +1,9 @@
 metric,value,unit,note
-records,5,,
-Eg_mean,1.141574,eV,
-Eg_std,0.08450787788129578,eV,
-splitting_mean,60.05,meV,
-splitting_std,13.11157198813323,meV,
+records,6,,
+Eg_mean,1.1185416666666668,eV,
+Eg_std,0.09275645393837685,eV,
+splitting_mean,62.52166666666667,meV,
+splitting_std,13.18357995976645,meV,
 Eg_vs_Bi_slope,-87.62231300627711,meV/%Bi,linear fit
 Eg_vs_Bi_intercept,1.4345830146929903,eV,linear fit
 splitting_vs_Bi_slope,13.671099694918807,meV/%Bi,linear fit
