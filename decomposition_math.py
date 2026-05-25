@@ -55,6 +55,32 @@ _SPLIT_TRANSITION_PARAMETER_NAMES = (
 _DEFAULT_FEATURE_BASELINE_WIDTHS_EV = (0.08, 0.12, 0.20, 0.35, 0.60, 0.90)
 
 
+# Stokes-vector order used everywhere in this module. Keeping these names close
+# to the formulas below avoids silent sign mistakes from hard-coded indices.
+_STOKES_I, _STOKES_Q, _STOKES_U, _STOKES_V = range(4)
+_STOKES_ORDER = ("I", "Q", "U", "V")
+
+# Effective differential Mueller-generator convention.
+#
+# Rows and columns are in Stokes order (I, Q, U, V):
+#
+#     [[ a,   LD_x,  LD_y,  CD  ],
+#      [ LD_x, a,    CB,   -LB_y],
+#      [ LD_y,-CB,   a,     LB_x],
+#      [ CD,   LB_y,-LB_x,  a   ]]
+#
+# Symmetric I/polarization couplings are dichroism terms. Antisymmetric
+# couplings inside the Q/U/V polarization block are birefringence/retardance
+# terms. These are signed effective-generator amplitudes; changing Stokes or
+# handedness conventions changes signs, not the magnitudes.
+_LD_X_PAIR = (_STOKES_I, _STOKES_Q)
+_LD_Y_PAIR = (_STOKES_I, _STOKES_U)
+_CD_PAIR = (_STOKES_I, _STOKES_V)
+_LB_X_PAIR = (_STOKES_U, _STOKES_V)
+_LB_Y_PAIR = (_STOKES_V, _STOKES_Q)
+_CB_PAIR = (_STOKES_Q, _STOKES_U)
+
+
 # Array and Mueller-matrix helpers
 
 def _as_numeric_array(values: Any) -> np.ndarray:
@@ -170,6 +196,22 @@ def _angle_from_components(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         angle = np.where(significant_imag, np.nan, angle)
 
     return angle
+
+
+def _symmetric_generator_component(
+    L: np.ndarray, pair: tuple[int, int]
+) -> np.ndarray:
+    """Return the symmetric generator component for a Stokes-index pair."""
+    row, col = pair
+    return 0.5 * (L[..., row, col] + L[..., col, row])
+
+
+def _antisymmetric_generator_component(
+    L: np.ndarray, positive_pair: tuple[int, int]
+) -> np.ndarray:
+    """Return the signed antisymmetric component L[row, col] - L[col, row]."""
+    row, col = positive_pair
+    return 0.5 * (L[..., row, col] - L[..., col, row])
 
 
 def normalize_mueller(M: np.ndarray) -> np.ndarray:
@@ -291,7 +333,7 @@ def reconstruction_error(M: np.ndarray, L: np.ndarray) -> np.ndarray:
 
 
 def remove_isotropic_part(L: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Remove the scalar isotropic part trace(L) / 4 from a generator.
+    """Remove the scalar isotropic log-scale part trace(L) / 4.
 
     Parameters
     ----------
@@ -308,9 +350,10 @@ def remove_isotropic_part(L: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
     Notes
     -----
-    The trace term represents scalar isotropic attenuation in this effective
-    generator convention. Subtracting it leaves the anisotropic generator terms
-    used for dichroism and retardance interpretation.
+    ``isotropic_attenuation`` is a signed generator value kept for API
+    compatibility. For an absolute scalar transmission factor T, it is
+    ``log(T)`` per integrated path; attenuation in the positive absorption
+    sense is therefore ``-isotropic_attenuation``.
     """
     arr = _as_numeric_array(L)
     _validate_mueller_shape(arr, "L")
@@ -321,7 +364,7 @@ def remove_isotropic_part(L: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def decompose_generator_terms(L: np.ndarray) -> dict[str, np.ndarray]:
-    """Extract approximate differential Mueller generator terms.
+    """Extract effective Mueller-generator terms.
 
     The extraction uses the convention
 
@@ -334,7 +377,7 @@ def decompose_generator_terms(L: np.ndarray) -> dict[str, np.ndarray]:
     where LD_x and LD_y are linear dichroism components, CD is circular
     dichroism, LB_x and LB_y are linear birefringence / linear retardance
     components, CB is circular birefringence / optical rotation, and a is
-    isotropic attenuation.
+    the signed isotropic log-scale term.
 
     This is a practical extraction convention for an effective differential
     generator. Signs, axis definitions, Stokes-vector ordering, and handedness
@@ -345,12 +388,12 @@ def decompose_generator_terms(L: np.ndarray) -> dict[str, np.ndarray]:
     _validate_mueller_shape(arr, "L")
 
     isotropic_attenuation = np.trace(arr, axis1=-2, axis2=-1) / 4.0
-    linear_dichroism_x = 0.5 * (arr[..., 0, 1] + arr[..., 1, 0])
-    linear_dichroism_y = 0.5 * (arr[..., 0, 2] + arr[..., 2, 0])
-    circular_dichroism = 0.5 * (arr[..., 0, 3] + arr[..., 3, 0])
-    linear_birefringence_x = 0.5 * (arr[..., 2, 3] - arr[..., 3, 2])
-    linear_birefringence_y = 0.5 * (arr[..., 3, 1] - arr[..., 1, 3])
-    circular_birefringence = 0.5 * (arr[..., 1, 2] - arr[..., 2, 1])
+    linear_dichroism_x = _symmetric_generator_component(arr, _LD_X_PAIR)
+    linear_dichroism_y = _symmetric_generator_component(arr, _LD_Y_PAIR)
+    circular_dichroism = _symmetric_generator_component(arr, _CD_PAIR)
+    linear_birefringence_x = _antisymmetric_generator_component(arr, _LB_X_PAIR)
+    linear_birefringence_y = _antisymmetric_generator_component(arr, _LB_Y_PAIR)
+    circular_birefringence = _antisymmetric_generator_component(arr, _CB_PAIR)
 
     linear_dichroism_magnitude = np.sqrt(linear_dichroism_x**2 + linear_dichroism_y**2)
     linear_birefringence_magnitude = np.sqrt(
