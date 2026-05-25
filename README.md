@@ -44,19 +44,26 @@ Typical workflow:
 3. Inspect the `Results`, `Results Panel`, `Splitting`, and plots.
 4. In the `Database` tab, choose or manually edit the accepted `Eg` and
    `Delta Vb`.
-5. Enter `Bi %` when known.
-6. Click `Save Selected Result` or `Save + Push to GitHub`.
+5. Enter `Bi %`, composition, R/strain value, thickness, and notes when known.
+6. Click `Save / Update` or `Save + Push to GitHub`.
+7. Select an existing database row to load it into the form, edit the fields,
+   and save it back.
 
 ## Shared Database
 
 The database is intentionally plain text for GitHub:
 
 - `selected_results.jsonl` is the source of truth.
-- `selected_results.csv` is regenerated for spreadsheet use.
+- `selected_results.csv` is regenerated for spreadsheet use and includes sample
+  metadata fields such as composition, R/strain value, thickness, and notes.
 - `comparisons/eg_vs_delta_vb.png`
 - `comparisons/eg_vs_bi_percent.png`
 - `comparisons/delta_vb_vs_bi_percent.png`
 - `comparisons/comparison_summary.csv`
+
+The comparison summary includes the current linear Delta Vb vs Bi trend in
+`meV/%Bi` and the fit `R`/`R2` values whenever at least two Bi-tagged records
+are available.
 
 The app's GitHub push uses your local Git authentication. It does not store
 tokens or passwords.

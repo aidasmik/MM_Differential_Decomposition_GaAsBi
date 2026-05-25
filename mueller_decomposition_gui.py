@@ -517,6 +517,7 @@ class MuellerDecompositionApp(tk.Tk):
         self.database_tree: ttk.Treeview | None = None
         self.result_match_by_iid: dict[str, dict] = {}
         self.database_record_by_iid: dict[str, dict] = {}
+        self.db_edit_record_id = tk.StringVar(value="")
 
         self.dat_path = tk.StringVar(value="")
         self.output_dir = tk.StringVar(value="")
@@ -536,14 +537,18 @@ class MuellerDecompositionApp(tk.Tk):
             value=str(detected_database or sdb.DEFAULT_DATABASE_DIR)
         )
         self.db_sample_id = tk.StringVar(value="")
+        self.db_composition = tk.StringVar(value="")
         self.db_bi_percent = tk.StringVar(value="")
         self.db_temperature_c = tk.StringVar(value="")
+        self.db_strain_r_value = tk.StringVar(value="")
+        self.db_thickness = tk.StringVar(value="")
         self.db_result_rank = tk.StringVar(value="")
         self.db_eg_eV = tk.StringVar(value="")
         self.db_splitting_meV = tk.StringVar(value="")
         self.db_status = tk.StringVar(value="accepted")
         self.db_analyst = tk.StringVar(value="")
         self.db_message = tk.StringVar(value="")
+        self.db_relation_summary = tk.StringVar(value="")
         self.db_git_message = tk.StringVar(value="Update GaAsBi results database")
         self.db_notes_text: tk.Text | None = None
         self.db_rank_combo: ttk.Combobox | None = None
@@ -1382,9 +1387,19 @@ class MuellerDecompositionApp(tk.Tk):
         text = self._format_result_value(value, precision)
         return text
 
+    def _set_notes_text(self, text: str) -> None:
+        if self.db_notes_text is None:
+            return
+        self.db_notes_text.delete("1.0", "end")
+        self.db_notes_text.insert("1.0", text)
+
+    def _clear_database_edit_mode(self) -> None:
+        self.db_edit_record_id.set("")
+
     def _fill_database_from_match(self, match: dict | None) -> None:
         if not match:
             return
+        self._clear_database_edit_mode()
         self.db_result_rank.set(str(match.get("rank", "")))
         self.db_eg_eV.set(self._entry_float(match.get("bandgap_eV"), 5))
         recommended = self._entry_float(match.get("recommended_delta_vb_meV"), 2)
@@ -1409,15 +1424,18 @@ class MuellerDecompositionApp(tk.Tk):
                 self.db_message.set(message)
 
     def _initialize_database_form(self, summary: dict, consensus: dict) -> None:
+        self._clear_database_edit_mode()
         sample_id = sdb.default_sample_id(summary.get("dat_path"))
         self.db_sample_id.set(sample_id)
         inferred_temp = sdb.infer_temperature_c(sample_id)
         self.db_temperature_c.set("" if inferred_temp is None else f"{inferred_temp:g}")
+        self.db_composition.set("")
         self.db_bi_percent.set("")
+        self.db_strain_r_value.set("")
+        self.db_thickness.set("" if summary.get("thickness") is None else f"{float(summary['thickness']):g}")
         self.db_status.set("accepted")
         self.db_analyst.set("")
-        if self.db_notes_text is not None:
-            self.db_notes_text.delete("1.0", "end")
+        self._set_notes_text("")
         matches = consensus.get("matches", [])
         if self.db_rank_combo is not None:
             self.db_rank_combo.configure(
@@ -1425,10 +1443,31 @@ class MuellerDecompositionApp(tk.Tk):
             )
         self._fill_database_from_match(consensus.get("primary"))
 
+    def _load_database_record_for_edit(self, record: dict) -> None:
+        self.db_edit_record_id.set(str(record.get("record_id", "")))
+        self.db_sample_id.set(str(record.get("sample_id", "")))
+        self.db_composition.set(str(record.get("composition", "")))
+        self.db_bi_percent.set(self._entry_float(record.get("bi_percent"), 4))
+        self.db_temperature_c.set(self._entry_float(record.get("temperature_C"), 4))
+        self.db_strain_r_value.set(self._entry_float(record.get("strain_r_value"), 6))
+        self.db_thickness.set(self._entry_float(record.get("thickness"), 6))
+        self.db_result_rank.set(str(record.get("selected_result_rank", "")))
+        self.db_eg_eV.set(self._entry_float(record.get("eg_eV"), 5))
+        self.db_splitting_meV.set(
+            self._entry_float(record.get("valence_band_splitting_meV"), 2)
+        )
+        self.db_status.set(str(record.get("status", "accepted")) or "accepted")
+        self.db_analyst.set(str(record.get("analyst", "")))
+        self._set_notes_text(str(record.get("notes", "")))
+        self.db_message.set(
+            f"Editing existing database record: {record.get('sample_id', '')}"
+        )
+
     def _add_database_panel(self, summary: dict, consensus: dict) -> ttk.Frame:
         frame = ttk.Frame(self.output_notebook, padding=8)
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(10, weight=1)
+        frame.columnconfigure(3, weight=1)
+        frame.rowconfigure(11, weight=1)
 
         ttk.Label(frame, text="Database folder").grid(row=0, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.database_dir).grid(
@@ -1457,6 +1496,19 @@ class MuellerDecompositionApp(tk.Tk):
             padx=(8, 8),
             pady=(8, 0),
         )
+        ttk.Label(frame, text="Composition").grid(
+            row=1,
+            column=2,
+            sticky="w",
+            pady=(8, 0),
+        )
+        ttk.Entry(frame, textvariable=self.db_composition).grid(
+            row=1,
+            column=3,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
 
         ttk.Label(frame, text="Result rank").grid(row=2, column=0, sticky="w", pady=(8, 0))
         self.db_rank_combo = ttk.Combobox(
@@ -1467,6 +1519,14 @@ class MuellerDecompositionApp(tk.Tk):
         )
         self.db_rank_combo.grid(row=2, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
         self.db_rank_combo.bind("<<ComboboxSelected>>", self._on_database_rank_selected)
+        ttk.Label(frame, text="Status").grid(row=2, column=2, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            frame,
+            textvariable=self.db_status,
+            values=("accepted", "provisional", "needs_review", "excluded"),
+            state="readonly",
+            width=16,
+        ).grid(row=2, column=3, sticky="w", padx=(8, 0), pady=(8, 0))
 
         ttk.Label(frame, text="Eg eV").grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=self.db_eg_eV, width=16).grid(
@@ -1478,16 +1538,15 @@ class MuellerDecompositionApp(tk.Tk):
         )
         ttk.Label(frame, text="Delta Vb meV").grid(
             row=3,
-            column=1,
+            column=2,
             sticky="w",
-            padx=(170, 8),
             pady=(8, 0),
         )
         ttk.Entry(frame, textvariable=self.db_splitting_meV, width=16).grid(
             row=3,
-            column=1,
+            column=3,
             sticky="w",
-            padx=(275, 8),
+            padx=(8, 0),
             pady=(8, 0),
         )
 
@@ -1501,69 +1560,90 @@ class MuellerDecompositionApp(tk.Tk):
         )
         ttk.Label(frame, text="Temperature C").grid(
             row=4,
-            column=1,
+            column=2,
             sticky="w",
-            padx=(170, 8),
             pady=(8, 0),
         )
         ttk.Entry(frame, textvariable=self.db_temperature_c, width=16).grid(
             row=4,
-            column=1,
+            column=3,
             sticky="w",
-            padx=(275, 8),
+            padx=(8, 0),
             pady=(8, 0),
         )
 
-        ttk.Label(frame, text="Status").grid(row=5, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(
-            frame,
-            textvariable=self.db_status,
-            values=("accepted", "provisional", "needs_review", "excluded"),
-            state="readonly",
-            width=16,
-        ).grid(row=5, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
-        ttk.Label(frame, text="Analyst").grid(
+        ttk.Label(frame, text="R strain").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.db_strain_r_value, width=16).grid(
             row=5,
             column=1,
             sticky="w",
-            padx=(170, 8),
+            padx=(8, 8),
             pady=(8, 0),
         )
+        ttk.Label(frame, text="Thickness").grid(
+            row=5,
+            column=2,
+            sticky="w",
+            pady=(8, 0),
+        )
+        ttk.Entry(frame, textvariable=self.db_thickness, width=16).grid(
+            row=5,
+            column=3,
+            sticky="w",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        ttk.Label(frame, text="Analyst").grid(row=6, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=self.db_analyst, width=20).grid(
-            row=5,
-            column=1,
-            sticky="w",
-            padx=(275, 8),
-            pady=(8, 0),
-        )
-
-        ttk.Label(frame, text="Git commit").grid(row=6, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(frame, textvariable=self.db_git_message).grid(
             row=6,
             column=1,
+            sticky="w",
+            padx=(8, 8),
+            pady=(8, 0),
+        )
+        ttk.Label(frame, textvariable=self.db_relation_summary, foreground="gray25").grid(
+            row=6,
+            column=2,
             columnspan=2,
+            sticky="w",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        ttk.Label(frame, text="Git commit").grid(row=7, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.db_git_message).grid(
+            row=7,
+            column=1,
+            columnspan=3,
             sticky="ew",
             padx=(8, 0),
             pady=(8, 0),
         )
 
-        ttk.Label(frame, text="Notes").grid(row=7, column=0, sticky="nw", pady=(8, 0))
+        ttk.Label(frame, text="Notes").grid(row=8, column=0, sticky="nw", pady=(8, 0))
         self.db_notes_text = tk.Text(frame, height=3, wrap="word")
         self.db_notes_text.grid(
-            row=7,
+            row=8,
             column=1,
-            columnspan=2,
+            columnspan=3,
             sticky="ew",
             padx=(8, 0),
             pady=(8, 0),
         )
 
         actions = ttk.Frame(frame)
-        actions.grid(row=8, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Button(actions, text="Save Selected Result", command=self._save_database_record).grid(
+        actions.grid(row=9, column=1, columnspan=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Button(actions, text="New From Analysis", command=lambda: self._initialize_database_form(summary, consensus)).grid(
             row=0,
             column=0,
             sticky="w",
+        )
+        ttk.Button(actions, text="Save / Update", command=self._save_database_record).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=(8, 0),
         )
         ttk.Button(
             actions,
@@ -1571,19 +1651,19 @@ class MuellerDecompositionApp(tk.Tk):
             command=lambda: self._save_database_record(push_to_github=True),
         ).grid(
             row=0,
-            column=1,
+            column=2,
             sticky="w",
             padx=(8, 0),
         )
         ttk.Button(actions, text="Push Database to GitHub", command=self._push_database_to_github).grid(
             row=0,
-            column=2,
+            column=3,
             sticky="w",
             padx=(8, 0),
         )
         ttk.Button(actions, text="Delete Selected", command=self._delete_database_record).grid(
             row=0,
-            column=3,
+            column=4,
             sticky="w",
             padx=(8, 0),
         )
@@ -1593,46 +1673,65 @@ class MuellerDecompositionApp(tk.Tk):
             command=lambda: self._delete_database_record(push_to_github=True),
         ).grid(
             row=0,
-            column=4,
+            column=5,
             sticky="w",
             padx=(8, 0),
         )
         ttk.Button(actions, text="Refresh Comparisons", command=self._refresh_database_comparisons).grid(
             row=0,
-            column=5,
+            column=6,
             sticky="w",
             padx=(8, 0),
         )
         ttk.Button(actions, text="Open Database Folder", command=self._open_database_folder).grid(
             row=0,
-            column=6,
+            column=7,
             sticky="w",
             padx=(8, 0),
         )
 
         ttk.Label(frame, textvariable=self.db_message, foreground="gray25").grid(
-            row=9,
+            row=10,
             column=0,
-            columnspan=3,
+            columnspan=4,
             sticky="w",
             pady=(8, 0),
         )
 
-        columns = ("sample", "bi", "eg", "splitting", "status", "source")
+        columns = (
+            "sample",
+            "composition",
+            "bi",
+            "delta_per_bi",
+            "eg",
+            "splitting",
+            "strain",
+            "thickness",
+            "status",
+            "source",
+        )
         self.database_tree = ttk.Treeview(frame, columns=columns, show="headings", height=8)
         headings = {
             "sample": "Sample",
+            "composition": "Composition",
             "bi": "Bi %",
+            "delta_per_bi": "Delta/Bi",
             "eg": "Eg eV",
             "splitting": "Splitting meV",
+            "strain": "R strain",
+            "thickness": "Thickness",
             "status": "Status",
             "source": "Source",
         }
         widths = {
             "sample": 210,
+            "composition": 130,
             "bi": 70,
+            "delta_per_bi": 85,
             "eg": 85,
             "splitting": 110,
+            "strain": 80,
+            "thickness": 90,
             "status": 90,
             "source": 260,
         }
@@ -1642,9 +1741,10 @@ class MuellerDecompositionApp(tk.Tk):
         y_scroll = ttk.Scrollbar(frame, orient="vertical", command=self.database_tree.yview)
         x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=self.database_tree.xview)
         self.database_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-        self.database_tree.grid(row=10, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
-        y_scroll.grid(row=10, column=2, sticky="ns", pady=(10, 0))
-        x_scroll.grid(row=11, column=0, columnspan=2, sticky="ew")
+        self.database_tree.bind("<<TreeviewSelect>>", self._on_database_tree_select)
+        self.database_tree.grid(row=11, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        y_scroll.grid(row=11, column=3, sticky="ns", pady=(10, 0))
+        x_scroll.grid(row=12, column=0, columnspan=3, sticky="ew")
 
         self._initialize_database_form(summary, consensus)
         self._refresh_database_table()
@@ -1654,7 +1754,15 @@ class MuellerDecompositionApp(tk.Tk):
         return frame
 
     def _on_database_rank_selected(self, _event: tk.Event | None = None) -> None:
-        self._fill_database_from_match(self._match_by_rank(self.db_result_rank.get()))
+        selected_rank = self.db_result_rank.get()
+        if (
+            self.db_edit_record_id.get().strip()
+            and self.current_summary is not None
+            and self.current_consensus is not None
+        ):
+            self._initialize_database_form(self.current_summary, self.current_consensus)
+            self.db_result_rank.set(selected_rank)
+        self._fill_database_from_match(self._match_by_rank(selected_rank))
 
     def _on_result_tree_select(self, _event: tk.Event | None = None) -> None:
         if self.results_tree is None:
@@ -1663,7 +1771,18 @@ class MuellerDecompositionApp(tk.Tk):
         if not selection:
             return
         match = self.result_match_by_iid.get(selection[0])
+        if (
+            self.db_edit_record_id.get().strip()
+            and self.current_summary is not None
+            and self.current_consensus is not None
+        ):
+            self._initialize_database_form(self.current_summary, self.current_consensus)
         self._fill_database_from_match(match)
+
+    def _on_database_tree_select(self, _event: tk.Event | None = None) -> None:
+        record = self._selected_database_record()
+        if record is not None:
+            self._load_database_record_for_edit(record)
 
     def _browse_database_dir(self) -> None:
         path = filedialog.askdirectory(title="Select shared database folder")
@@ -1690,7 +1809,8 @@ class MuellerDecompositionApp(tk.Tk):
         return Path(text or "shared_database")
 
     def _save_database_record(self, push_to_github: bool = False) -> None:
-        if self.current_summary is None:
+        edit_record_id = self.db_edit_record_id.get().strip()
+        if self.current_summary is None and not edit_record_id:
             messagebox.showerror("No analysis", "Run an analysis before saving a result.")
             return
         sample_id = self.db_sample_id.get().strip()
@@ -1708,6 +1828,11 @@ class MuellerDecompositionApp(tk.Tk):
                 "Temperature C",
                 self.db_temperature_c.get(),
             )
+            strain_r_value = self._parse_optional_float(
+                "R strain",
+                self.db_strain_r_value.get(),
+            )
+            thickness = self._parse_optional_float("Thickness", self.db_thickness.get())
         except Exception as exc:
             messagebox.showerror("Invalid database value", str(exc))
             return
@@ -1716,7 +1841,7 @@ class MuellerDecompositionApp(tk.Tk):
         if self.db_notes_text is not None:
             notes = self.db_notes_text.get("1.0", "end").strip()
         match = self._match_by_rank(self.db_result_rank.get())
-        if match and match.get("requires_manual_delta_vb"):
+        if not edit_record_id and match and match.get("requires_manual_delta_vb"):
             warnings_text = "; ".join(
                 str(value) for value in match.get("math_warnings", [])
             )
@@ -1731,27 +1856,70 @@ class MuellerDecompositionApp(tk.Tk):
         summary_path = None
         if self.last_analysis_output is not None:
             summary_path = self.last_analysis_output.get("summary_path")
-        record = sdb.build_record(
-            summary=self.current_summary,
-            selected_match=match,
-            sample_id=sample_id,
-            eg_eV=eg,
-            valence_band_splitting_meV=splitting,
-            bi_percent=bi_percent,
-            temperature_C=temperature_c,
-            status=self.db_status.get(),
-            analyst=self.db_analyst.get().strip(),
-            notes=notes,
-            analysis_summary_path=summary_path,
-        )
         try:
-            paths = sdb.upsert_record(record, self._database_path())
+            if edit_record_id:
+                records = sdb.load_records(self._database_path())
+                existing = next(
+                    (
+                        dict(record)
+                        for record in records
+                        if str(record.get("record_id", "")) == edit_record_id
+                    ),
+                    None,
+                )
+                if existing is None:
+                    raise ValueError(
+                        f"No database record found with record_id={edit_record_id!r}."
+                    )
+                existing.update(
+                    {
+                        "sample_id": sample_id,
+                        "record_id": sample_id,
+                        "composition": self.db_composition.get().strip(),
+                        "bi_percent": bi_percent,
+                        "temperature_C": temperature_c,
+                        "strain_r_value": strain_r_value,
+                        "thickness": thickness,
+                        "eg_eV": eg,
+                        "valence_band_splitting_meV": splitting,
+                        "selected_result_rank": self.db_result_rank.get().strip(),
+                        "status": self.db_status.get(),
+                        "analyst": self.db_analyst.get().strip(),
+                        "notes": notes,
+                        "saved_at": sdb._now_iso(),
+                    }
+                )
+                paths = sdb.replace_record(edit_record_id, existing, self._database_path())
+                saved_action = "Updated"
+                self._clear_database_edit_mode()
+            else:
+                record = sdb.build_record(
+                    summary=self.current_summary,
+                    selected_match=match,
+                    sample_id=sample_id,
+                    eg_eV=eg,
+                    valence_band_splitting_meV=splitting,
+                    composition=self.db_composition.get().strip(),
+                    bi_percent=bi_percent,
+                    temperature_C=temperature_c,
+                    strain_r_value=strain_r_value,
+                    thickness=thickness,
+                    status=self.db_status.get(),
+                    analyst=self.db_analyst.get().strip(),
+                    notes=notes,
+                    analysis_summary_path=summary_path,
+                )
+                paths = sdb.upsert_record(record, self._database_path())
+                saved_action = "Saved"
         except Exception as exc:
             messagebox.showerror("Database save failed", str(exc))
             return
-        self.db_message.set(f"Saved {sample_id} to {paths['jsonl']}")
         self._refresh_database_table()
         self._show_database_comparison_plots(paths)
+        self.db_message.set(
+            f"{saved_action} {sample_id} to {paths['jsonl']}. "
+            f"{self.db_relation_summary.get()}"
+        )
         if push_to_github:
             self._push_database_to_github()
 
@@ -1765,19 +1933,29 @@ class MuellerDecompositionApp(tk.Tk):
             records = sdb.sorted_records_for_display(sdb.load_records(self._database_path()))
         except Exception as exc:
             self.db_message.set(f"Could not load database: {exc}")
+            self.db_relation_summary.set("")
             return
+        self.db_relation_summary.set(sdb.format_delta_vb_bi_summary(records))
         for record in records:
+            delta_per_bi = sdb._ratio_or_none(
+                record.get("valence_band_splitting_meV"),
+                record.get("bi_percent"),
+            )
             iid = self.database_tree.insert(
                 "",
                 "end",
                 values=(
                     record.get("sample_id", ""),
+                    record.get("composition", ""),
                     self._format_result_value(record.get("bi_percent"), 3),
+                    self._format_result_value(delta_per_bi, 2),
                     self._format_result_value(record.get("eg_eV"), 5),
                     self._format_result_value(
                         record.get("valence_band_splitting_meV"),
                         2,
                     ),
+                    self._format_result_value(record.get("strain_r_value"), 5),
+                    self._format_result_value(record.get("thickness"), 5),
                     record.get("status", ""),
                     record.get("source_file", ""),
                 ),
@@ -1813,9 +1991,14 @@ class MuellerDecompositionApp(tk.Tk):
         except Exception as exc:
             messagebox.showerror("Delete failed", str(exc))
             return
-        self.db_message.set(f"Deleted {sample_id or record_id} from database.")
+        if self.db_edit_record_id.get().strip() == record_id:
+            self._clear_database_edit_mode()
         self._refresh_database_table()
         self._show_database_comparison_plots(paths)
+        self.db_message.set(
+            f"Deleted {sample_id or record_id} from database. "
+            f"{self.db_relation_summary.get()}"
+        )
         if push_to_github:
             self._push_database_to_github()
 

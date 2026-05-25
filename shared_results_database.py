@@ -35,15 +35,33 @@ CSV_FIELDS = [
     "sample_id",
     "source_file",
     "measurement_datetime",
+    "composition",
     "bi_percent",
     "temperature_C",
+    "strain_r_value",
+    "thickness",
+    "analysis_thickness",
     "eg_eV",
     "valence_band_splitting_meV",
+    "delta_vb_per_bi_meV_per_percent",
     "recommended_delta_vb_meV",
     "recommended_delta_source",
     "requires_manual_delta_vb",
+    "selected_delta_source",
+    "selected_delta_label",
+    "selected_delta_rank",
+    "selected_delta_term",
+    "selected_delta_lower_transition_eV",
+    "selected_delta_upper_transition_eV",
+    "selected_delta_center_eV",
     "math_warnings",
     "kk_splitting_meV",
+    "direct_derivative_splitting_meV",
+    "direct_derivative_spread_meV",
+    "direct_derivative_confidence",
+    "recommendation_spread_meV",
+    "recommendation_components_meV",
+    "recommendation_notes",
     "eg_spread_eV",
     "splitting_spread_meV",
     "lower_transition_spread_meV",
@@ -135,6 +153,14 @@ def _csv_value(value: Any) -> str:
     return str(value)
 
 
+def _ratio_or_none(numerator: Any, denominator: Any) -> float | None:
+    top = _finite_float(numerator)
+    bottom = _finite_float(denominator)
+    if top is None or bottom is None or bottom == 0.0:
+        return None
+    return top / bottom
+
+
 def _jsonl_path(database_dir: Path) -> Path:
     return database_dir / JSONL_NAME
 
@@ -174,7 +200,8 @@ def write_records_csv(
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for record in records:
-            writer.writerow({field: _csv_value(record.get(field)) for field in CSV_FIELDS})
+            row_record = _normalize_record_for_save(record)
+            writer.writerow({field: _csv_value(row_record.get(field)) for field in CSV_FIELDS})
     return path
 
 
@@ -206,6 +233,27 @@ def _as_float_list(values: Any) -> list[float]:
     return out
 
 
+def _normalize_record_for_save(record: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(record)
+    normalized["record_id"] = _slug(
+        str(normalized.get("record_id") or normalized.get("sample_id"))
+    )
+    normalized["bi_percent"] = _finite_float(normalized.get("bi_percent"))
+    normalized["temperature_C"] = _finite_float(normalized.get("temperature_C"))
+    normalized["strain_r_value"] = _finite_float(normalized.get("strain_r_value"))
+    normalized["thickness"] = _finite_float(normalized.get("thickness"))
+    normalized["analysis_thickness"] = _finite_float(normalized.get("analysis_thickness"))
+    normalized["eg_eV"] = _finite_float(normalized.get("eg_eV"))
+    normalized["valence_band_splitting_meV"] = _finite_float(
+        normalized.get("valence_band_splitting_meV")
+    )
+    normalized["delta_vb_per_bi_meV_per_percent"] = _ratio_or_none(
+        normalized.get("valence_band_splitting_meV"),
+        normalized.get("bi_percent"),
+    )
+    return normalized
+
+
 def build_record(
     *,
     summary: dict[str, Any],
@@ -213,8 +261,11 @@ def build_record(
     sample_id: str,
     eg_eV: float,
     valence_band_splitting_meV: float,
+    composition: str = "",
     bi_percent: float | None = None,
     temperature_C: float | None = None,
+    strain_r_value: float | None = None,
+    thickness: float | None = None,
     status: str = "accepted",
     analyst: str = "",
     notes: str = "",
@@ -231,15 +282,48 @@ def build_record(
         "source_file": source_name,
         "source_path": str(dat_path),
         "measurement_datetime": infer_measurement_datetime(source_name),
+        "composition": composition,
         "bi_percent": bi_percent,
         "temperature_C": temperature_C,
+        "strain_r_value": strain_r_value,
+        "thickness": thickness,
+        "analysis_thickness": _finite_float(summary.get("thickness")),
         "eg_eV": float(eg_eV),
         "valence_band_splitting_meV": float(valence_band_splitting_meV),
+        "delta_vb_per_bi_meV_per_percent": _ratio_or_none(
+            valence_band_splitting_meV,
+            bi_percent,
+        ),
         "recommended_delta_vb_meV": _finite_float(match.get("recommended_delta_vb_meV")),
         "recommended_delta_source": str(match.get("recommended_delta_source", "")),
         "requires_manual_delta_vb": bool(match.get("requires_manual_delta_vb", False)),
+        "selected_delta_source": str(match.get("selected_delta_source", "")),
+        "selected_delta_label": str(match.get("selected_delta_label", "")),
+        "selected_delta_rank": match.get("selected_delta_rank", ""),
+        "selected_delta_term": str(match.get("selected_delta_term", "")),
+        "selected_delta_lower_transition_eV": _finite_float(
+            match.get("selected_delta_lower_transition_eV")
+        ),
+        "selected_delta_upper_transition_eV": _finite_float(
+            match.get("selected_delta_upper_transition_eV")
+        ),
+        "selected_delta_center_eV": _finite_float(match.get("selected_delta_center_eV")),
         "math_warnings": [str(value) for value in match.get("math_warnings", [])],
         "kk_splitting_meV": _finite_float(match.get("kk_splitting_meV")),
+        "direct_derivative_splitting_meV": _finite_float(
+            match.get("direct_derivative_splitting_meV")
+        ),
+        "direct_derivative_spread_meV": _finite_float(
+            match.get("direct_derivative_spread_meV")
+        ),
+        "direct_derivative_confidence": str(match.get("direct_derivative_confidence", "")),
+        "recommendation_spread_meV": _finite_float(match.get("recommendation_spread_meV")),
+        "recommendation_components_meV": _as_float_list(
+            match.get("recommendation_components_meV")
+        ),
+        "recommendation_notes": [
+            str(value) for value in match.get("recommendation_notes", [])
+        ],
         "eg_spread_eV": _finite_float(match.get("bandgap_spread_eV")),
         "splitting_spread_meV": _finite_float(match.get("spread_meV")),
         "lower_transition_spread_meV": _finite_float(
@@ -280,10 +364,33 @@ def upsert_record(
 ) -> dict[str, Path]:
     db_dir = Path(database_dir)
     db_dir.mkdir(parents=True, exist_ok=True)
-    record = dict(record)
-    record["record_id"] = _slug(str(record.get("record_id") or record.get("sample_id")))
+    record = _normalize_record_for_save(record)
     existing = load_records(db_dir)
     records = [item for item in existing if item.get("record_id") != record["record_id"]]
+    records.append(record)
+    records.sort(key=lambda item: str(item.get("sample_id", "")))
+
+    jsonl = _write_jsonl(records, db_dir)
+    csv_path = write_records_csv(records, db_dir)
+    comparison_paths = build_comparison_outputs(db_dir, records=records)
+    return {"jsonl": jsonl, "csv": csv_path, **comparison_paths}
+
+
+def replace_record(
+    original_record_id: str,
+    record: dict[str, Any],
+    database_dir: str | Path = DEFAULT_DATABASE_DIR,
+) -> dict[str, Path]:
+    db_dir = Path(database_dir)
+    db_dir.mkdir(parents=True, exist_ok=True)
+    record = _normalize_record_for_save(record)
+    existing = load_records(db_dir)
+    records = [
+        item
+        for item in existing
+        if str(item.get("record_id", "")) != str(original_record_id)
+        and str(item.get("record_id", "")) != str(record["record_id"])
+    ]
     records.append(record)
     records.sort(key=lambda item: str(item.get("sample_id", "")))
 
@@ -490,6 +597,57 @@ def _valid_xy(
     return x_values, y_values, labels
 
 
+def linear_fit_statistics(
+    records: list[dict[str, Any]],
+    x_field: str,
+    y_field: str,
+) -> dict[str, float | int | None]:
+    x_values, y_values, _ = _valid_xy(records, x_field, y_field)
+    stats: dict[str, float | int | None] = {
+        "n": len(x_values),
+        "slope": None,
+        "intercept": None,
+        "r_value": None,
+        "r_squared": None,
+    }
+    if len(set(float(value) for value in x_values)) < 2:
+        return stats
+
+    x = np.asarray(x_values, dtype=np.float64)
+    y = np.asarray(y_values, dtype=np.float64)
+    slope, intercept = np.polyfit(x, y, 1)
+    stats["slope"] = float(slope)
+    stats["intercept"] = float(intercept)
+    if x.size >= 2 and float(np.std(x)) > 0.0 and float(np.std(y)) > 0.0:
+        r_value = float(np.corrcoef(x, y)[0, 1])
+        stats["r_value"] = r_value
+        stats["r_squared"] = r_value * r_value
+    return stats
+
+
+def delta_vb_bi_statistics(
+    records: list[dict[str, Any]],
+) -> dict[str, float | int | None]:
+    return linear_fit_statistics(records, "bi_percent", "valence_band_splitting_meV")
+
+
+def format_delta_vb_bi_summary(records: list[dict[str, Any]]) -> str:
+    stats = delta_vb_bi_statistics(records)
+    n_points = int(stats.get("n") or 0)
+    slope = stats.get("slope")
+    if slope is None:
+        return f"Delta Vb/Bi trend: need at least two Bi-tagged records ({n_points} available)."
+    r_squared = stats.get("r_squared")
+    if r_squared is None:
+        fit_text = "R2 n/a"
+    else:
+        fit_text = f"R2={float(r_squared):.3f}"
+    return (
+        f"Delta Vb/Bi trend: {float(slope):.2f} meV/%Bi "
+        f"from {n_points} records ({fit_text})."
+    )
+
+
 def _all_y(
     records: list[dict[str, Any]],
     y_field: str,
@@ -618,6 +776,8 @@ def build_comparison_outputs(
         "bi_percent",
         "valence_band_splitting_meV",
     )
+    eg_bi_stats = linear_fit_statistics(records, "bi_percent", "eg_eV")
+    split_bi_stats = delta_vb_bi_statistics(records)
     with summary_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(["metric", "value", "unit", "note"])
@@ -640,16 +800,37 @@ def build_comparison_outputs(
                 "",
             ]
         )
-        if len(set(bi_eg_x)) >= 2:
-            slope, intercept = np.polyfit(bi_eg_x, bi_eg_y, 1)
-            writer.writerow(["Eg_vs_Bi_slope", 1000.0 * slope, "meV/%Bi", "linear fit"])
-            writer.writerow(["Eg_vs_Bi_intercept", intercept, "eV", "linear fit"])
-        if len(set(bi_split_x)) >= 2:
-            slope, intercept = np.polyfit(bi_split_x, bi_split_y, 1)
+        if eg_bi_stats["slope"] is not None:
             writer.writerow(
-                ["splitting_vs_Bi_slope", slope, "meV/%Bi", "linear fit"]
+                [
+                    "Eg_vs_Bi_slope",
+                    1000.0 * float(eg_bi_stats["slope"]),
+                    "meV/%Bi",
+                    "linear fit",
+                ]
             )
-            writer.writerow(["splitting_vs_Bi_intercept", intercept, "meV", "linear fit"])
+            writer.writerow(["Eg_vs_Bi_intercept", eg_bi_stats["intercept"], "eV", "linear fit"])
+            writer.writerow(["Eg_vs_Bi_R", eg_bi_stats["r_value"], "", "linear fit"])
+            writer.writerow(["Eg_vs_Bi_R2", eg_bi_stats["r_squared"], "", "linear fit"])
+        if split_bi_stats["slope"] is not None:
+            writer.writerow(
+                [
+                    "DeltaVb_vs_Bi_slope",
+                    split_bi_stats["slope"],
+                    "meV/%Bi",
+                    "linear fit",
+                ]
+            )
+            writer.writerow(
+                [
+                    "DeltaVb_vs_Bi_intercept",
+                    split_bi_stats["intercept"],
+                    "meV",
+                    "linear fit",
+                ]
+            )
+            writer.writerow(["DeltaVb_vs_Bi_R", split_bi_stats["r_value"], "", "linear fit"])
+            writer.writerow(["DeltaVb_vs_Bi_R2", split_bi_stats["r_squared"], "", "linear fit"])
     paths["summary"] = summary_path
 
     x_values, y_values, labels = _valid_xy(records, "bi_percent", "eg_eV")
