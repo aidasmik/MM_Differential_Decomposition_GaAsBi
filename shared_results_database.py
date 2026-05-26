@@ -297,7 +297,9 @@ def build_record(
         "recommended_delta_vb_meV": _finite_float(match.get("recommended_delta_vb_meV")),
         "recommended_delta_source": str(match.get("recommended_delta_source", "")),
         "requires_manual_delta_vb": bool(match.get("requires_manual_delta_vb", False)),
-        "selected_delta_source": str(match.get("selected_delta_source", "")),
+        "selected_delta_source": str(
+            match.get("selected_delta_source", match.get("recommended_delta_source", ""))
+        ),
         "selected_delta_label": str(match.get("selected_delta_label", "")),
         "selected_delta_rank": match.get("selected_delta_rank", ""),
         "selected_delta_term": str(match.get("selected_delta_term", "")),

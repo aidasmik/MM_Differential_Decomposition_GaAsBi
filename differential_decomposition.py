@@ -34,7 +34,8 @@ import numpy as np
 from scipy.linalg import expm
 
 # Keep these names available through differential_decomposition for existing
-# GUI, CLI, and notebook callers; implementations live in decomposition_math.py.
+# GUI, CLI, and notebook callers. Matrix-log math is re-exported through
+# decomposition_math.py from mueller_log_math.py.
 from decomposition_math import (
     _DEFAULT_FEATURE_BASELINE_WIDTHS_EV,
     _MATRIX_SHAPE,

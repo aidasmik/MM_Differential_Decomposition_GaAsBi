@@ -515,7 +515,11 @@ class MuellerDecompositionApp(tk.Tk):
         self.splitting_tree: ttk.Treeview | None = None
         self.results_tree: ttk.Treeview | None = None
         self.database_tree: ttk.Treeview | None = None
+        self.split_fit_canvas: tk.Canvas | None = None
+        self.split_fit_image_item: int | None = None
+        self.split_fit_image: tk.PhotoImage | None = None
         self.result_match_by_iid: dict[str, dict] = {}
+        self.splitting_estimate_by_iid: dict[str, dict] = {}
         self.database_record_by_iid: dict[str, dict] = {}
         self.db_edit_record_id = tk.StringVar(value="")
 
@@ -543,6 +547,7 @@ class MuellerDecompositionApp(tk.Tk):
         self.db_strain_r_value = tk.StringVar(value="")
         self.db_thickness = tk.StringVar(value="")
         self.db_result_rank = tk.StringVar(value="")
+        self.db_delta_source = tk.StringVar(value="")
         self.db_eg_eV = tk.StringVar(value="")
         self.db_splitting_meV = tk.StringVar(value="")
         self.db_status = tk.StringVar(value="accepted")
@@ -552,6 +557,8 @@ class MuellerDecompositionApp(tk.Tk):
         self.db_git_message = tk.StringVar(value="Update GaAsBi results database")
         self.db_notes_text: tk.Text | None = None
         self.db_rank_combo: ttk.Combobox | None = None
+        self.db_delta_combo: ttk.Combobox | None = None
+        self.delta_candidate_by_label: dict[str, dict] = {}
 
         self._build_ui()
         self.after(150, self._poll_messages)
@@ -1383,6 +1390,454 @@ class MuellerDecompositionApp(tk.Tk):
                 return match
         return None
 
+    def _all_delta_candidates(self) -> list[dict]:
+        candidates: list[dict] = []
+        used_labels: set[str] = set()
+
+        def finite_number(value: Any) -> float | None:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return None
+            return number if np.isfinite(number) else None
+
+        def add_candidate(label: str, value: Any, source: str, **metadata: Any) -> None:
+            number = finite_number(value)
+            if number is None:
+                return
+            unique_label = label
+            suffix = 2
+            while unique_label in used_labels:
+                unique_label = f"{label} ({suffix})"
+                suffix += 1
+            used_labels.add(unique_label)
+            candidates.append(
+                {
+                    "label": unique_label,
+                    "value": number,
+                    "source": source,
+                    **metadata,
+                }
+            )
+
+        splitting = {}
+        if self.current_summary is not None:
+            splitting = self.current_summary.get("valence_band_splitting", {})
+        estimates = [
+            estimate
+            for estimate in splitting.get("estimates", [])
+            if estimate.get("success")
+        ]
+        estimate_by_rank = {
+            str(estimate.get("rank", "")): estimate for estimate in estimates
+        }
+
+        def component_metadata(match: dict, term: str) -> dict[str, Any]:
+            metadata: dict[str, Any] = {"term": term}
+            terms = [str(value) for value in match.get("component_terms", [])]
+            try:
+                index = terms.index(term)
+            except ValueError:
+                index = -1
+            ranks = match.get("component_estimate_ranks", [])
+            if index >= 0 and index < len(ranks):
+                estimate = estimate_by_rank.get(str(ranks[index]), {})
+                metadata.update(
+                    {
+                        "estimate_rank": estimate.get("rank", ranks[index]),
+                        "energy_window_eV": estimate.get("energy_window_eV"),
+                        "feature_energies_eV": estimate.get("feature_energies_eV"),
+                        "vector_part": estimate.get("vector_part"),
+                        "fit_component": estimate.get("fit_component"),
+                        "axis_offset_deg": estimate.get("axis_offset_deg"),
+                        "lower_transition_eV": estimate.get(
+                            "lower_transition_eV",
+                            metadata.get("lower_transition_eV"),
+                        ),
+                        "upper_transition_eV": estimate.get(
+                            "upper_transition_eV",
+                            metadata.get("upper_transition_eV"),
+                        ),
+                        "center_eV": estimate.get("center_eV"),
+                    }
+                )
+            return metadata
+
+        def default_component_metadata(match: dict) -> dict[str, Any]:
+            terms = [str(value) for value in match.get("component_terms", [])]
+            preferred = [
+                term
+                for term in ("linear_dichroism", "linear_birefringence")
+                if term in terms
+            ]
+            preferred.extend(term for term in terms if term not in preferred)
+            for term in preferred:
+                metadata = component_metadata(match, term)
+                if metadata.get("energy_window_eV"):
+                    return metadata
+            return {}
+
+        matches = self.current_consensus.get("matches", []) if self.current_consensus else []
+        for match in matches:
+            rank = match.get("rank", "")
+            prefix = f"Result {rank}"
+            recommended_metadata = component_metadata(
+                match,
+                str(match.get("single_component_delta_source", "")),
+            )
+            recommended_metadata.update(
+                {
+                    "lower_transition_eV": match.get(
+                        "single_component_lower_transition_eV",
+                        recommended_metadata.get("lower_transition_eV"),
+                    ),
+                    "upper_transition_eV": match.get(
+                        "single_component_upper_transition_eV",
+                        recommended_metadata.get("upper_transition_eV"),
+                    ),
+                }
+            )
+            add_candidate(
+                f"{prefix} recommended: "
+                f"{self._format_result_value(match.get('recommended_delta_vb_meV'), 2)} meV",
+                match.get("recommended_delta_vb_meV"),
+                str(match.get("recommended_delta_source", "")) or "recommended_delta_vb",
+                kind="match_recommended",
+                match_rank=rank,
+                requires_manual_delta_vb=bool(match.get("requires_manual_delta_vb")),
+                **recommended_metadata,
+            )
+            add_candidate(
+                f"{prefix} raw LD/LB mean: "
+                f"{self._format_result_value(match.get('splitting_meV'), 2)} meV",
+                match.get("splitting_meV"),
+                "raw_ld_lb_mean",
+                kind="match_raw_mean",
+                match_rank=rank,
+                requires_manual_delta_vb=bool(match.get("math_warnings")),
+                **default_component_metadata(match),
+            )
+            add_candidate(
+                f"{prefix} KK: "
+                f"{self._format_result_value(match.get('kk_splitting_meV'), 2)} meV",
+                match.get("kk_splitting_meV"),
+                "joint_kk",
+                kind="match_kk",
+                match_rank=rank,
+                requires_manual_delta_vb=not bool(match.get("kk_fit_success", True)),
+                **default_component_metadata(match),
+            )
+            add_candidate(
+                f"{prefix} dD/dE: "
+                f"{self._format_result_value(match.get('direct_derivative_splitting_meV'), 2)} meV",
+                match.get("direct_derivative_splitting_meV"),
+                "direct_derivative",
+                kind="match_direct_derivative",
+                match_rank=rank,
+                requires_manual_delta_vb=not bool(match.get("direct_derivative_usable")),
+                **default_component_metadata(match),
+            )
+
+        for estimate in estimates:
+            rank = estimate.get("rank", "")
+            term = str(estimate.get("term_prefix", ""))
+            quality = str(estimate.get("assignment_quality", ""))
+            stability = str(estimate.get("fit_stability", ""))
+            source = f"{term}_transition_separation" if term else "transition_separation"
+            add_candidate(
+                "Split "
+                f"{rank} {term.replace('_', ' ')}: "
+                f"{self._format_result_value(estimate.get('splitting_meV'), 2)} meV "
+                f"({quality}, {stability})",
+                estimate.get("splitting_meV"),
+                source,
+                kind="split_estimate",
+                estimate_rank=rank,
+                term=term,
+                lower_transition_eV=estimate.get("lower_transition_eV"),
+                upper_transition_eV=estimate.get("upper_transition_eV"),
+                center_eV=estimate.get("center_eV"),
+                energy_window_eV=estimate.get("energy_window_eV"),
+                feature_energies_eV=estimate.get("feature_energies_eV"),
+                vector_part=estimate.get("vector_part"),
+                fit_component=estimate.get("fit_component"),
+                axis_offset_deg=estimate.get("axis_offset_deg"),
+                assignment_quality=quality,
+                fit_stability=stability,
+                requires_manual_delta_vb=(stability != "stable"),
+            )
+        return candidates
+
+    def _default_delta_label_for_match(self, match: dict | None) -> str:
+        if not self.delta_candidate_by_label:
+            return ""
+        rank = match.get("rank") if match else None
+        for label, candidate in self.delta_candidate_by_label.items():
+            if (
+                candidate.get("kind") == "match_recommended"
+                and str(candidate.get("match_rank")) == str(rank)
+            ):
+                return label
+        for label, candidate in self.delta_candidate_by_label.items():
+            if (
+                candidate.get("kind") == "split_estimate"
+                and candidate.get("assignment_quality") == "paired_features"
+                and not candidate.get("requires_manual_delta_vb")
+            ):
+                return label
+        for label, candidate in self.delta_candidate_by_label.items():
+            if (
+                candidate.get("kind") == "split_estimate"
+                and candidate.get("term") == "linear_dichroism"
+                and not candidate.get("requires_manual_delta_vb")
+            ):
+                return label
+        return next(iter(self.delta_candidate_by_label))
+
+    def _populate_delta_candidates(self, match: dict | None) -> None:
+        candidates = self._all_delta_candidates()
+        self.delta_candidate_by_label = {
+            str(candidate["label"]): candidate for candidate in candidates
+        }
+        labels = tuple(self.delta_candidate_by_label)
+        if self.db_delta_combo is not None:
+            self.db_delta_combo.configure(values=labels)
+        self.db_delta_source.set(self._default_delta_label_for_match(match))
+
+    def _selected_delta_candidate(self) -> dict | None:
+        return self.delta_candidate_by_label.get(self.db_delta_source.get())
+
+    def _apply_delta_candidate_to_form(self) -> None:
+        candidate = self._selected_delta_candidate()
+        if candidate is None:
+            return
+        self.db_splitting_meV.set(self._entry_float(candidate.get("value"), 2))
+
+    def _set_split_fit_image(self, image_path: Path) -> None:
+        if not image_path.exists():
+            return
+        try:
+            image = tk.PhotoImage(file=str(image_path))
+        except tk.TclError as exc:
+            self._append_results(f"Could not show {image_path}: {exc}\n")
+            return
+        self.split_fit_image = image
+        if self.split_fit_canvas is None:
+            self._add_image_tab("Split Fit", image_path)
+            return
+        canvas = self.split_fit_canvas
+        if self.split_fit_image_item is None:
+            self.split_fit_image_item = canvas.create_image(
+                0,
+                0,
+                anchor="nw",
+                image=image,
+            )
+        else:
+            canvas.itemconfigure(self.split_fit_image_item, image=image)
+        canvas.configure(scrollregion=(0, 0, image.width(), image.height()))
+
+    def _candidate_energy_window(self, candidate: dict) -> tuple[float, float] | None:
+        window = candidate.get("energy_window_eV")
+        if isinstance(window, (list, tuple)) and len(window) >= 2:
+            try:
+                lower = float(window[0])
+                upper = float(window[1])
+            except (TypeError, ValueError):
+                return None
+            if np.isfinite(lower) and np.isfinite(upper) and upper > lower:
+                return lower, upper
+        return None
+
+    def _candidate_feature_energies(self, candidate: dict) -> list[float]:
+        values = []
+        for value in candidate.get("feature_energies_eV") or []:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(number):
+                values.append(number)
+        if values:
+            return values
+        features = []
+        for value in (candidate.get("lower_transition_eV"), candidate.get("upper_transition_eV")):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(number):
+                features.append(number)
+        return features
+
+    def _update_split_fit_for_selection(self) -> None:
+        candidate = self._selected_delta_candidate()
+        if candidate is None or not candidate.get("term"):
+            return
+        if self.last_analysis_output is None:
+            return
+        result = self.last_analysis_output.get("result")
+        if not result:
+            return
+        window = self._candidate_energy_window(candidate)
+        if window is None:
+            return
+
+        term = str(candidate["term"])
+        vector_part = str(candidate.get("vector_part") or self.vector_part.get())
+        fit_component = str(candidate.get("fit_component") or self.fit_component.get())
+        try:
+            axis_offset = float(
+                candidate.get("axis_offset_deg")
+                if candidate.get("axis_offset_deg") is not None
+                else self.axis_offset_deg.get()
+            )
+        except (TypeError, ValueError):
+            axis_offset = 0.0
+        try:
+            exponent = self._parse_required_float("CP exponent", self.exponent.get())
+        except ValueError:
+            exponent = -0.5
+        try:
+            max_delta = self._parse_required_float("Max Delta eV", self.max_delta_eV.get())
+        except ValueError:
+            max_delta = 0.20
+
+        self.term_prefix.set(term)
+        self.energy_min.set(f"{window[0]:.4f}")
+        self.energy_max.set(f"{window[1]:.4f}")
+        self.vector_part.set(vector_part)
+        self.fit_component.set(fit_component)
+        self.axis_offset_deg.set(f"{axis_offset:g}")
+
+        try:
+            fit = dd._best_local_split_fit(
+                result,
+                term_prefix=term,
+                energy_min=window[0],
+                energy_max=window[1],
+                feature_energies=self._candidate_feature_energies(candidate),
+                vector_part=vector_part,
+                fit_component=fit_component,
+                axis_offset_deg=axis_offset,
+                exponent=exponent,
+                max_delta_eV=max_delta,
+            )
+        except Exception:
+            try:
+                fit = dd.fit_split_transition_to_decomposition(
+                    result,
+                    term_prefix=term,
+                    energy_min=window[0],
+                    energy_max=window[1],
+                    vector_part=vector_part,
+                    fit_component=fit_component,
+                    axis_offset_deg=axis_offset,
+                    exponent=exponent,
+                    max_delta_eV=max_delta,
+                )
+            except Exception as exc:
+                self.db_message.set(f"Could not update Split Fit: {exc}")
+                return
+
+        output_dir = self.last_output_dir
+        if output_dir is None and self.current_summary is not None:
+            output_dir = Path(str(self.current_summary.get("output_dir", ".")))
+        if output_dir is None:
+            return
+        output_dir.mkdir(parents=True, exist_ok=True)
+        fit["output_dir"] = output_dir
+        label = str(candidate.get("label", "selected"))
+        safe_label = "".join(ch if ch.isalnum() else "_" for ch in label)[:80].strip("_")
+        filename = f"selected_split_fit_{safe_label or 'candidate'}.png"
+
+        matplotlib_config_dir = output_dir / ".matplotlib"
+        matplotlib_config_dir.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_config_dir))
+
+        import matplotlib
+
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+
+        fig = dd.plot_split_transition_fit(fit, filename=filename)
+        plt.close(fig)
+        self._set_split_fit_image(output_dir / filename)
+
+    def _set_database_selection_message(
+        self,
+        match: dict | None,
+        candidate: dict | None,
+    ) -> None:
+        if not match:
+            return
+        rank = match.get("rank", "")
+        confidence = str(match.get("confidence", ""))
+        basis = str(match.get("basis", ""))
+        if candidate is None:
+            self.db_message.set(f"Selected Eg rank {rank}; enter Delta Vb manually.")
+            return
+        delta_text = self._entry_float(candidate.get("value"), 2)
+        source = str(candidate.get("source", ""))
+        message = f"Selected Eg rank {rank}; Delta Vb {delta_text} meV from {source}"
+        details = "; ".join(value for value in (confidence, basis) if value)
+        if details:
+            message = f"{message}; {details}"
+        if candidate.get("requires_manual_delta_vb"):
+            message = f"{message}; manual review"
+        self.db_message.set(message)
+
+    def _match_with_delta_selection(
+        self,
+        match: dict | None,
+        candidate: dict | None,
+        selected_delta_meV: float,
+    ) -> dict | None:
+        if match is None:
+            return None
+        selected = dict(match)
+        if candidate is None:
+            selected["recommended_delta_vb_meV"] = float(selected_delta_meV)
+            selected["recommended_delta_source"] = "manual_entry"
+            selected["recommendation_components_meV"] = [float(selected_delta_meV)]
+            selected["recommendation_spread_meV"] = 0.0
+            selected["requires_manual_delta_vb"] = True
+            return selected
+
+        candidate_value = float(candidate["value"])
+        selected_value = float(selected_delta_meV)
+        source = str(candidate.get("source", "selected_delta_candidate"))
+        if abs(selected_value - candidate_value) > 0.05:
+            source = f"manual_override_of_{source}"
+        selected["recommended_delta_vb_meV"] = selected_value
+        selected["recommended_delta_source"] = source
+        selected["recommendation_components_meV"] = [selected_value]
+        selected["recommendation_spread_meV"] = 0.0
+        selected["requires_manual_delta_vb"] = bool(
+            candidate.get("requires_manual_delta_vb")
+            or source.startswith("manual_override")
+        )
+        selected["selected_delta_source"] = source
+        selected["selected_delta_label"] = str(candidate.get("label", ""))
+        selected["selected_delta_rank"] = candidate.get(
+            "estimate_rank",
+            candidate.get("match_rank", ""),
+        )
+        selected["selected_delta_term"] = str(candidate.get("term", ""))
+        selected["selected_delta_lower_transition_eV"] = candidate.get(
+            "lower_transition_eV"
+        )
+        selected["selected_delta_upper_transition_eV"] = candidate.get(
+            "upper_transition_eV"
+        )
+        selected["selected_delta_center_eV"] = candidate.get("center_eV")
+        notes = [str(value) for value in selected.get("recommendation_notes", [])]
+        note = f"Delta Vb selected separately from {candidate.get('label', '')}."
+        if note not in notes:
+            notes.append(note)
+        selected["recommendation_notes"] = notes
+        return selected
+
     def _entry_float(self, value: Any, precision: int = 5) -> str:
         text = self._format_result_value(value, precision)
         return text
@@ -1396,32 +1851,22 @@ class MuellerDecompositionApp(tk.Tk):
     def _clear_database_edit_mode(self) -> None:
         self.db_edit_record_id.set("")
 
-    def _fill_database_from_match(self, match: dict | None) -> None:
+    def _fill_database_from_match(
+        self,
+        match: dict | None,
+        *,
+        update_split_fit: bool = True,
+    ) -> None:
         if not match:
             return
         self._clear_database_edit_mode()
         self.db_result_rank.set(str(match.get("rank", "")))
         self.db_eg_eV.set(self._entry_float(match.get("bandgap_eV"), 5))
-        recommended = self._entry_float(match.get("recommended_delta_vb_meV"), 2)
-        self.db_splitting_meV.set(recommended)
-        basis = str(match.get("basis", ""))
-        confidence = str(match.get("confidence", ""))
-        raw_split = self._entry_float(match.get("splitting_meV"), 2)
-        warnings_text = "; ".join(str(value) for value in match.get("math_warnings", []))
-        if basis or confidence:
-            if recommended:
-                self.db_message.set(
-                    f"Selected rank {match.get('rank', '')}: using recommended "
-                    f"Delta Vb {recommended} meV; {confidence}; {basis}"
-                )
-            else:
-                message = (
-                    f"Selected rank {match.get('rank', '')}: Delta Vb needs manual "
-                    f"review; raw LD/LB mean is {raw_split} meV; {confidence}; {basis}"
-                )
-                if warnings_text:
-                    message = f"{message}; {warnings_text}"
-                self.db_message.set(message)
+        self._populate_delta_candidates(match)
+        self._apply_delta_candidate_to_form()
+        self._set_database_selection_message(match, self._selected_delta_candidate())
+        if update_split_fit:
+            self._update_split_fit_for_selection()
 
     def _initialize_database_form(self, summary: dict, consensus: dict) -> None:
         self._clear_database_edit_mode()
@@ -1441,7 +1886,7 @@ class MuellerDecompositionApp(tk.Tk):
             self.db_rank_combo.configure(
                 values=tuple(str(match.get("rank", "")) for match in matches)
             )
-        self._fill_database_from_match(consensus.get("primary"))
+        self._fill_database_from_match(consensus.get("primary"), update_split_fit=False)
 
     def _load_database_record_for_edit(self, record: dict) -> None:
         self.db_edit_record_id.set(str(record.get("record_id", "")))
@@ -1452,6 +1897,22 @@ class MuellerDecompositionApp(tk.Tk):
         self.db_strain_r_value.set(self._entry_float(record.get("strain_r_value"), 6))
         self.db_thickness.set(self._entry_float(record.get("thickness"), 6))
         self.db_result_rank.set(str(record.get("selected_result_rank", "")))
+        delta_label = str(
+            record.get("selected_delta_label")
+            or record.get("selected_delta_source")
+            or record.get("recommended_delta_source")
+            or ""
+        )
+        if delta_label and self.db_delta_combo is not None:
+            raw_values = self.db_delta_combo.cget("values")
+            current_values = (
+                tuple(self.tk.splitlist(raw_values))
+                if isinstance(raw_values, str)
+                else tuple(raw_values or ())
+            )
+            if delta_label not in current_values:
+                self.db_delta_combo.configure(values=(delta_label, *current_values))
+        self.db_delta_source.set(delta_label)
         self.db_eg_eV.set(self._entry_float(record.get("eg_eV"), 5))
         self.db_splitting_meV.set(
             self._entry_float(record.get("valence_band_splitting_meV"), 2)
@@ -1519,14 +1980,15 @@ class MuellerDecompositionApp(tk.Tk):
         )
         self.db_rank_combo.grid(row=2, column=1, sticky="w", padx=(8, 8), pady=(8, 0))
         self.db_rank_combo.bind("<<ComboboxSelected>>", self._on_database_rank_selected)
-        ttk.Label(frame, text="Status").grid(row=2, column=2, sticky="w", pady=(8, 0))
-        ttk.Combobox(
+        ttk.Label(frame, text="Delta source").grid(row=2, column=2, sticky="w", pady=(8, 0))
+        self.db_delta_combo = ttk.Combobox(
             frame,
-            textvariable=self.db_status,
-            values=("accepted", "provisional", "needs_review", "excluded"),
+            textvariable=self.db_delta_source,
             state="readonly",
-            width=16,
-        ).grid(row=2, column=3, sticky="w", padx=(8, 0), pady=(8, 0))
+            width=52,
+        )
+        self.db_delta_combo.grid(row=2, column=3, sticky="ew", padx=(8, 0), pady=(8, 0))
+        self.db_delta_combo.bind("<<ComboboxSelected>>", self._on_delta_source_selected)
 
         ttk.Label(frame, text="Eg eV").grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=self.db_eg_eV, width=16).grid(
@@ -1602,12 +2064,19 @@ class MuellerDecompositionApp(tk.Tk):
             padx=(8, 8),
             pady=(8, 0),
         )
+        ttk.Label(frame, text="Status").grid(row=6, column=2, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            frame,
+            textvariable=self.db_status,
+            values=("accepted", "provisional", "needs_review", "excluded"),
+            state="readonly",
+            width=16,
+        ).grid(row=6, column=3, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Label(frame, textvariable=self.db_relation_summary, foreground="gray25").grid(
             row=6,
-            column=2,
-            columnspan=2,
+            column=3,
             sticky="w",
-            padx=(8, 0),
+            padx=(140, 0),
             pady=(8, 0),
         )
 
@@ -1764,6 +2233,15 @@ class MuellerDecompositionApp(tk.Tk):
             self.db_result_rank.set(selected_rank)
         self._fill_database_from_match(self._match_by_rank(selected_rank))
 
+    def _on_delta_source_selected(self, _event: tk.Event | None = None) -> None:
+        self._clear_database_edit_mode()
+        self._apply_delta_candidate_to_form()
+        self._set_database_selection_message(
+            self._match_by_rank(self.db_result_rank.get()),
+            self._selected_delta_candidate(),
+        )
+        self._update_split_fit_for_selection()
+
     def _on_result_tree_select(self, _event: tk.Event | None = None) -> None:
         if self.results_tree is None:
             return
@@ -1778,6 +2256,28 @@ class MuellerDecompositionApp(tk.Tk):
         ):
             self._initialize_database_form(self.current_summary, self.current_consensus)
         self._fill_database_from_match(match)
+
+    def _on_splitting_tree_select(self, _event: tk.Event | None = None) -> None:
+        if self.splitting_tree is None:
+            return
+        selection = self.splitting_tree.selection()
+        if not selection:
+            return
+        estimate = self.splitting_estimate_by_iid.get(selection[0])
+        if not estimate:
+            return
+        self._clear_database_edit_mode()
+        if not self.delta_candidate_by_label:
+            self._populate_delta_candidates(self._match_by_rank(self.db_result_rank.get()))
+        estimate_rank = str(estimate.get("rank", ""))
+        for label, candidate in self.delta_candidate_by_label.items():
+            if (
+                candidate.get("kind") == "split_estimate"
+                and str(candidate.get("estimate_rank", "")) == estimate_rank
+            ):
+                self.db_delta_source.set(label)
+                self._on_delta_source_selected()
+                return
 
     def _on_database_tree_select(self, _event: tk.Event | None = None) -> None:
         record = self._selected_database_record()
@@ -1841,13 +2341,19 @@ class MuellerDecompositionApp(tk.Tk):
         if self.db_notes_text is not None:
             notes = self.db_notes_text.get("1.0", "end").strip()
         match = self._match_by_rank(self.db_result_rank.get())
-        if not edit_record_id and match and match.get("requires_manual_delta_vb"):
+        delta_candidate = self._selected_delta_candidate()
+        selected_match = self._match_with_delta_selection(
+            match,
+            delta_candidate,
+            splitting,
+        )
+        if not edit_record_id and selected_match and selected_match.get("requires_manual_delta_vb"):
             warnings_text = "; ".join(
-                str(value) for value in match.get("math_warnings", [])
+                str(value) for value in selected_match.get("math_warnings", [])
             )
             proceed = messagebox.askyesno(
                 "Manual Delta Vb",
-                "The selected result failed the automatic Delta Vb math checks. "
+                "The selected Delta Vb needs manual review. "
                 "Save your manually entered splitting anyway?\n\n"
                 f"{warnings_text}",
             )
@@ -1882,6 +2388,9 @@ class MuellerDecompositionApp(tk.Tk):
                         "thickness": thickness,
                         "eg_eV": eg,
                         "valence_band_splitting_meV": splitting,
+                        "recommended_delta_vb_meV": splitting,
+                        "recommendation_components_meV": [splitting],
+                        "recommendation_spread_meV": 0.0,
                         "selected_result_rank": self.db_result_rank.get().strip(),
                         "status": self.db_status.get(),
                         "analyst": self.db_analyst.get().strip(),
@@ -1895,7 +2404,7 @@ class MuellerDecompositionApp(tk.Tk):
             else:
                 record = sdb.build_record(
                     summary=self.current_summary,
-                    selected_match=match,
+                    selected_match=selected_match,
                     sample_id=sample_id,
                     eg_eV=eg,
                     valence_band_splitting_meV=splitting,
@@ -2158,7 +2667,9 @@ class MuellerDecompositionApp(tk.Tk):
                     "",
                     "failed",
                 )
-            tree.insert("", "end", values=values)
+            iid = tree.insert("", "end", values=values)
+            self.splitting_estimate_by_iid[iid] = estimate
+        tree.bind("<<TreeviewSelect>>", self._on_splitting_tree_select)
 
         self.output_notebook.add(frame, text="Splitting")
         self.dynamic_output_tabs.append(frame)
@@ -2191,8 +2702,12 @@ class MuellerDecompositionApp(tk.Tk):
             return None
 
         self.plot_images.append(image)
-        canvas.create_image(0, 0, anchor="nw", image=image)
+        image_item = canvas.create_image(0, 0, anchor="nw", image=image)
         canvas.configure(scrollregion=(0, 0, image.width(), image.height()))
+        if title == "Split Fit":
+            self.split_fit_canvas = canvas
+            self.split_fit_image_item = image_item
+            self.split_fit_image = image
 
         self.output_notebook.add(frame, text=title)
         self.dynamic_output_tabs.append(frame)
@@ -2244,8 +2759,18 @@ class MuellerDecompositionApp(tk.Tk):
         self.splitting_tree = None
         self.results_tree = None
         self.database_tree = None
+        self.db_rank_combo = None
+        self.db_delta_combo = None
+        self.db_notes_text = None
+        self.split_fit_canvas = None
+        self.split_fit_image_item = None
+        self.split_fit_image = None
         self.result_match_by_iid.clear()
+        self.splitting_estimate_by_iid.clear()
         self.database_record_by_iid.clear()
+        self.delta_candidate_by_label.clear()
+        self.db_delta_source.set("")
+        self._clear_database_edit_mode()
         self.last_analysis_output = None
         self.current_summary = None
         self.current_consensus = None

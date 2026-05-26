@@ -11,8 +11,10 @@ saving accepted results to a shared Git-friendly database.
   database saving, and GitHub push.
 - `differential_decomposition.py` - Woollam parsing, analysis orchestration,
   plotting, and reporting logic.
-- `decomposition_math.py` - readable numerical core: Mueller matrix logarithms,
-  feature detection, and split-transition fitting.
+- `mueller_log_math.py` - pure Mueller matrix logarithms, generator extraction,
+  and decomposition diagnostics.
+- `decomposition_math.py` - spectral smoothing, feature detection, and
+  split-transition fitting.
 - `split_transition_fit.py` - command-line analysis entry point.
 - `shared_results_database.py` - JSONL/CSV shared database and comparison plots.
 - `selected_results.jsonl` - canonical shared accepted-results database.
