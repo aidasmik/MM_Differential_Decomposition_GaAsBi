@@ -17,6 +17,7 @@ import numpy as np
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+import analysis_export as export
 import differential_decomposition as dd
 import shared_results_database as sdb
 
@@ -33,21 +34,6 @@ TERM_EXPORTS = [
     "dichroism_axis_angle_deg",
     "birefringence_axis_angle_deg",
 ]
-
-
-def json_ready(value):
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, complex):
-        return {"real": value.real, "imag": value.imag}
-    if isinstance(value, dict):
-        return {key: json_ready(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_ready(item) for item in value]
-    return value
-
 
 def finite_summary(values: np.ndarray) -> dict[str, float | int]:
     arr = np.asarray(values)
@@ -89,244 +75,6 @@ def write_terms_csv(path: Path, result: dict) -> None:
                 writer.writerow(row)
 
 
-def write_fit_csv(path: Path, fit: dict, source_energy_eV: np.ndarray) -> None:
-    collapsed = fit["collapsed"]
-    spectrum = np.asarray(collapsed["spectrum"])
-    scatter = np.asarray(collapsed["scatter"])
-    collapsed_by_energy = {
-        float(e): (complex(s), float(abs(sc)))
-        for e, s, sc in zip(np.asarray(source_energy_eV), spectrum, scatter)
-    }
-
-    energy = np.asarray(fit["energy_eV"], dtype=np.float64)
-    values = np.asarray(fit["values"])
-    fitted = np.asarray(fit["fitted_values"])
-    residuals = np.asarray(fit["residuals"])
-
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(
-            [
-                "energy_eV",
-                "fit_data_real",
-                "fit_data_imag",
-                "fit_real",
-                "fit_imag",
-                "residual_real",
-                "residual_imag",
-                "collapsed_real",
-                "collapsed_imag",
-                "rotation_scatter_abs",
-            ]
-        )
-        for e_v, value, fitted_value, residual in zip(energy, values, fitted, residuals):
-            collapsed_value, scatter_abs = collapsed_by_energy.get(
-                float(e_v), (complex(np.nan, np.nan), np.nan)
-            )
-            writer.writerow(
-                [
-                    f"{float(e_v):.10g}",
-                    f"{float(np.real(value)):.10g}",
-                    f"{float(np.imag(value)):.10g}",
-                    f"{float(np.real(fitted_value)):.10g}",
-                    f"{float(np.imag(fitted_value)):.10g}",
-                    f"{float(np.real(residual)):.10g}",
-                    f"{float(np.imag(residual)):.10g}",
-                    f"{float(np.real(collapsed_value)):.10g}",
-                    f"{float(np.imag(collapsed_value)):.10g}",
-                    f"{scatter_abs:.10g}",
-                ]
-            )
-
-
-def write_feature_csv(path: Path, feature_scan: dict) -> None:
-    fields = [
-        "rank",
-        "term_prefix",
-        "energy_eV",
-        "kind",
-        "component",
-        "component_value",
-        "baseline_value",
-        "detrended_value",
-        "amplitude_abs",
-        "prominence_abs",
-        "local_noise",
-        "z_score",
-        "prominence_z",
-        "rotation_scatter_abs",
-        "scatter_ratio",
-        "baseline_width_eV",
-        "score",
-        "inside_split_fit_window",
-    ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        for feature in feature_scan.get("features", []):
-            writer.writerow({field: feature.get(field, "") for field in fields})
-
-
-def write_splitting_csv(path: Path, splitting_estimates: dict) -> None:
-    fields = [
-        "rank",
-        "term_prefix",
-        "success",
-        "splitting_meV",
-        "splitting_eV",
-        "lower_transition_eV",
-        "upper_transition_eV",
-        "center_eV",
-        "broadening_meV",
-        "energy_window_min_eV",
-        "energy_window_max_eV",
-        "feature_energies_eV",
-        "feature_ranks",
-        "assignment_quality",
-        "normalization_scale",
-        "n_initial_guesses",
-        "candidate_delta_meV",
-        "near_best_delta_meV",
-        "delta_std_meV",
-        "fit_stability",
-        "rmse",
-        "mae",
-        "n_points",
-        "message",
-    ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        for rank, estimate in enumerate(splitting_estimates.get("estimates", []), start=1):
-            window = estimate.get("energy_window_eV", ("", ""))
-            row = {field: estimate.get(field, "") for field in fields}
-            row["rank"] = rank
-            row["energy_window_min_eV"] = window[0] if len(window) > 0 else ""
-            row["energy_window_max_eV"] = window[1] if len(window) > 1 else ""
-            row["feature_energies_eV"] = ";".join(
-                f"{float(energy):.10g}" for energy in estimate.get("feature_energies_eV", [])
-            )
-            row["feature_ranks"] = ";".join(
-                str(rank_value) for rank_value in estimate.get("feature_ranks", [])
-            )
-            row["candidate_delta_meV"] = ";".join(
-                f"{float(delta):.10g}" for delta in estimate.get("candidate_delta_meV", [])
-            )
-            row["near_best_delta_meV"] = ";".join(
-                f"{float(delta):.10g}" for delta in estimate.get("near_best_delta_meV", [])
-            )
-            writer.writerow(row)
-
-
-def write_consensus_csv(path: Path, splitting_estimates: dict) -> None:
-    fields = [
-        "rank",
-        "bandgap_eV",
-        "recommended_delta_vb_meV",
-        "recommended_delta_source",
-        "kk_splitting_meV",
-        "kk_component_max_difference_meV",
-        "kk_fit_success",
-        "kk_fit_message",
-        "bandgap_spread_eV",
-        "upper_transition_eV",
-        "upper_transition_spread_eV",
-        "center_eV",
-        "splitting_meV",
-        "spread_meV",
-        "std_meV",
-        "agreement_tolerance_meV",
-        "transition_tolerance_meV",
-        "lower_transition_spread_meV",
-        "upper_transition_spread_meV",
-        "center_spread_meV",
-        "within_agreement_tolerance",
-        "transitions_within_tolerance",
-        "confidence",
-        "basis",
-        "energy_windows_overlap",
-        "requires_manual_delta_vb",
-        "math_warnings",
-        "component_estimate_ranks",
-        "component_terms",
-        "component_splittings_meV",
-        "component_lower_transition_eV",
-        "component_upper_transition_eV",
-        "component_center_eV",
-        "component_assignment_quality",
-        "component_fit_stability",
-        "component_energy_windows_eV",
-    ]
-    consensus = splitting_estimates.get("results", splitting_estimates.get("consensus", {}))
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        for match in consensus.get("matches", []):
-            row = {}
-            for field in fields:
-                value = match.get(field, "")
-                if isinstance(value, float) and not np.isfinite(value):
-                    value = ""
-                row[field] = value
-            row["component_estimate_ranks"] = ";".join(
-                str(rank) for rank in match.get("component_estimate_ranks", [])
-            )
-            row["component_terms"] = ";".join(match.get("component_terms", []))
-            row["component_splittings_meV"] = ";".join(
-                f"{float(value):.10g}"
-                for value in match.get("component_splittings_meV", [])
-            )
-            row["component_lower_transition_eV"] = ";".join(
-                f"{float(value):.10g}"
-                for value in match.get("component_lower_transition_eV", [])
-            )
-            row["component_upper_transition_eV"] = ";".join(
-                f"{float(value):.10g}"
-                for value in match.get("component_upper_transition_eV", [])
-            )
-            row["component_center_eV"] = ";".join(
-                f"{float(value):.10g}"
-                for value in match.get("component_center_eV", [])
-            )
-            row["component_assignment_quality"] = ";".join(
-                match.get("component_assignment_quality", [])
-            )
-            row["component_fit_stability"] = ";".join(
-                match.get("component_fit_stability", [])
-            )
-            row["math_warnings"] = ";".join(
-                str(warning) for warning in match.get("math_warnings", [])
-            )
-            row["component_energy_windows_eV"] = ";".join(
-                f"{float(window[0]):.10g}-{float(window[1]):.10g}"
-                for window in match.get("component_energy_windows_eV", [])
-                if len(window) >= 2
-            )
-            writer.writerow(row)
-
-
-def write_short_report_csv(path: Path, rows: list[dict]) -> None:
-    fields = ["section", "metric", "value", "unit", "note"]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({field: row.get(field, "") for field in fields})
-
-
-def _mark_features_inside_fit_window(feature_scan: dict, fit: dict | None) -> None:
-    if fit is None:
-        return
-    window = fit.get("energy_window_eV", (None, None))
-    if window[0] is None or window[1] is None:
-        return
-    lower = float(window[0])
-    upper = float(window[1])
-    for feature in feature_scan.get("features", []):
-        energy = float(feature["energy_eV"])
-        feature["inside_split_fit_window"] = lower <= energy <= upper
-
-
 def build_summary(
     result: dict,
     fit: dict | None,
@@ -356,7 +104,7 @@ def build_summary(
         "dat_warnings": result["dat_diagnostics"]["warnings"],
     }
     if feature_scan is not None:
-        _mark_features_inside_fit_window(feature_scan, fit)
+        export.mark_features_inside_fit_window(feature_scan, fit)
         summary["feature_scan"] = feature_scan
     if splitting_estimates is not None:
         summary["valence_band_splitting"] = splitting_estimates
@@ -453,7 +201,7 @@ def run_analysis(config: dict, progress: queue.Queue) -> dict:
             / f"{fit['term_prefix']}_split_fit_{float(window[0]):.3f}_{float(window[1]):.3f}.png"
         )
         fit_csv = output_dir / "split_transition_fit_curve.csv"
-        write_fit_csv(fit_csv, fit, result["energy_eV"])
+        export.write_fit_csv(fit_csv, fit, result["energy_eV"])
 
     summary = build_summary(
         result,
@@ -463,9 +211,9 @@ def run_analysis(config: dict, progress: queue.Queue) -> dict:
         dat_path,
         output_dir,
     )
-    write_feature_csv(feature_csv, feature_scan)
-    write_splitting_csv(splitting_csv, splitting_estimates)
-    write_consensus_csv(results_csv, splitting_estimates)
+    export.write_feature_csv(feature_csv, feature_scan)
+    export.write_splitting_csv(splitting_csv, splitting_estimates)
+    export.write_consensus_csv(results_csv, splitting_estimates)
     report_rows = dd.build_short_report_rows(
         result,
         fit=fit,
@@ -473,9 +221,12 @@ def run_analysis(config: dict, progress: queue.Queue) -> dict:
         splitting_estimates=splitting_estimates,
         dat_path=dat_path,
     )
-    write_short_report_csv(short_report_csv, report_rows)
+    export.write_short_report_csv(short_report_csv, report_rows)
     summary_path = output_dir / "analysis_summary.json"
-    summary_path.write_text(json.dumps(json_ready(summary), indent=2), encoding="utf-8")
+    summary_path.write_text(
+        json.dumps(export.json_ready(summary), indent=2),
+        encoding="utf-8",
+    )
 
     progress.put(("log", "Done."))
     return {
