@@ -11,6 +11,10 @@ This folder contains curated dielectric-function and critical-point results for 
 - `critical_points_summary.md` - compact list of detected critical-point energy groups.
 - `valence_band_splitting_projection_summary.md` - projection-dependent near-gap splitting estimate.
 - `found_values.csv` - compact table of main extracted values.
+- `images/wavelength_fit_dielectric_functions_ev.png` - fitted complex dielectric functions plotted versus energy in eV.
+- `images/wavelength_fit_dielectric_axis_difference_ev.png` - anisotropy plot showing axis differences versus energy in eV.
+- `images/critical_point_markers_on_eps2.png` - critical-point markers over the imaginary dielectric response.
+- `completeease/VGA1028c_completeease_dielectric_tensor.mat` - MATLAB export for CompleteEASE-style fitting and reuse.
 
 ## Main Values
 
