@@ -1,0 +1,14 @@
+sample,quantity,value,unit,method_or_source,note
+VGA1028c,thickness,470.8,nm,full-spectrum uniaxial 5-oscillator fit,geometry parameter used for wavelength-by-wavelength refinement
+VGA1028c,phi0,-2.93,deg,full-spectrum uniaxial 5-oscillator fit,sample azimuth offset
+VGA1028c,projection_splitting_lower_estimate,35,meV,local complex CP derivative fit,near-gap epsilon_parallel vs epsilon_perp projection splitting
+VGA1028c,projection_splitting_upper_estimate,45,meV,second-derivative peak comparison,near-gap epsilon_parallel vs epsilon_perp projection splitting
+VGA1028c,recommended_projection_splitting,35-45,meV,combined derivative analysis,treat as provisional
+VGA1028c,near_gap_perp_peak,1.125010,eV,second derivative peak,epsilon_perp
+VGA1028c,near_gap_parallel_peak,1.167757,eV,second derivative peak,epsilon_parallel
+VGA1028c,anisotropy_peak_1,0.948192,eV,second derivative peak,epsilon_parallel - epsilon_perp
+VGA1028c,anisotropy_peak_2,2.471547,eV,second derivative peak,epsilon_parallel - epsilon_perp
+VGA1028c,anisotropy_peak_3,2.623105,eV,second derivative peak,epsilon_parallel - epsilon_perp
+VGA1028c,anisotropy_peak_4,2.796037,eV,second derivative peak,epsilon_parallel - epsilon_perp
+VGA1028c,anisotropy_peak_5,2.959254,eV,second derivative peak,epsilon_parallel - epsilon_perp
+VGA1028c,anisotropy_peak_6,3.087495,eV,second derivative peak,epsilon_parallel - epsilon_perp
