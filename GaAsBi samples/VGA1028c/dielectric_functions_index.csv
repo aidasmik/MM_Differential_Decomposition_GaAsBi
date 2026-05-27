@@ -1,0 +1,10 @@
+file,wavelength_min_nm,wavelength_max_nm,energy_max_eV,energy_min_eV,n_points
+dielectric_functions/dielectric_210_329nm.csv,210,329,5.9040094,3.7685167,120
+dielectric_functions/dielectric_330_449nm.csv,330,449,3.7570969,2.7613407,120
+dielectric_functions/dielectric_450_569nm.csv,450,569,2.7552044,2.1789842,120
+dielectric_functions/dielectric_570_689nm.csv,570,689,2.1751614,1.7994804,120
+dielectric_functions/dielectric_690_809nm.csv,690,809,1.7968724,1.5325612,120
+dielectric_functions/dielectric_810_929nm.csv,810,929,1.5306691,1.3345985,120
+dielectric_functions/dielectric_930_1122p5nm.csv,930,1122.5,1.3331634,1.1045363,120
+dielectric_functions/dielectric_1125_1422p5nm.csv,1125,1422.5,1.1020818,0.87159366,120
+dielectric_functions/dielectric_1425_1700nm.csv,1425,1700,0.87006455,0.72931881,111
