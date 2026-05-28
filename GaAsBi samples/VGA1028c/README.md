@@ -24,3 +24,25 @@ This folder contains curated dielectric-function and critical-point results for 
 - Strong anisotropy-related derivative peaks: `0.948`, `2.472`, `2.623`, `2.796`, `2.959`, `3.087 eV`.
 
 The wavelength-by-wavelength dielectric extraction froze geometry/thickness and fitted only `epsilon_perp` and `epsilon_parallel` at each wavelength.
+
+## Dielectric Function Plots
+
+### Complex Dielectric Functions
+
+![Fitted complex dielectric functions versus energy](images/wavelength_fit_dielectric_functions_ev.png)
+
+### Dielectric Axis Difference
+
+![Dielectric axis difference versus energy](images/wavelength_fit_dielectric_axis_difference_ev.png)
+
+### Critical Point Markers
+
+![Critical point markers over epsilon 2](images/critical_point_markers_on_eps2.png)
+
+## CompleteEASE Export
+
+The MATLAB export contains the uniaxial dielectric tensor arrays for reuse:
+
+- `epsilon_x = epsilon_y = epsilon_perp`
+- `epsilon_z = epsilon_parallel`
+- `wavelength_nm`, `energy_eV`, `epsilon_tensor_diag`, `n_perp`, `k_perp`, `n_parallel`, `k_parallel`, `thickness_nm`, and `phi0_deg`

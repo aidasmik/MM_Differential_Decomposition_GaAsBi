@@ -20,6 +20,8 @@ saving accepted results to a shared Git-friendly database.
 - `selected_results.jsonl` - canonical shared accepted-results database.
 - `selected_results.csv` - spreadsheet export regenerated from JSONL.
 - `comparisons/` - generated comparison plots and summaries.
+- `GaAsBi samples/` - curated per-sample dielectric tensor outputs, plots,
+  critical-point estimates, and CompleteEASE/MATLAB exports.
 
 ## Setup
 
@@ -70,6 +72,15 @@ are available.
 The app's GitHub push uses your local Git authentication. It does not store
 tokens or passwords.
 
+## Curated Sample Outputs
+
+Per-sample folders contain reduced results that are useful to share without
+committing raw `.dat` measurements. Current sample output:
+
+- [`GaAsBi samples/VGA1028c`](GaAsBi%20samples/VGA1028c/) - fitted uniaxial
+  dielectric tensor, critical-point candidates, anisotropy plots, and MATLAB
+  `.mat` export for CompleteEASE-style reuse.
+
 <!-- comparison-plots:start -->
 ## Current Comparison Plots
 
@@ -94,6 +105,6 @@ Summary table: [`comparisons/comparison_summary.csv`](comparisons/comparison_sum
 
 ## Notes
 
-Raw `.dat` measurements and generated per-sample result folders are ignored by
-default. Commit accepted database records and comparison outputs, not the raw
-measurement files, unless there is a deliberate reason to share them.
+Raw `.dat` measurements and temporary generated result folders are ignored by
+default. Commit accepted database records, comparison outputs, and curated
+sample summaries when they are ready to share.
